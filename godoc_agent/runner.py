@@ -3,7 +3,6 @@
 使い方:
     python -m godoc_agent.runner --repo /path/to/go-repo --out ./out --limit 5
     python -m godoc_agent.runner --repo /path/to/go-repo --out ./out --run-id 20261102-2100  # 中断した実行を再開
-    python -m godoc_agent.runner --repo /path/to/go-repo --out ./out-cc --engine claude-code  # Claude Code で生成
 """
 
 import argparse
@@ -25,8 +24,8 @@ from .claude_code import build_claude_code
 from .config import Settings, load_settings
 from .doc_graph import build_doc_graph
 from .go_source import discover_go_files, sha256_text
-from .llm import build_llm, preflight
-from .prompts import build_agent_messages, load_skill, load_template, required_sections
+from .preflight import preflight
+from .prompts import build_agent_messages, load_skill
 
 MANIFEST_NAME = ".manifest.json"
 
@@ -113,12 +112,12 @@ async def process_file(
 def summarize(results: list[FileResult], wall_s: float) -> str:
     counts = Counter(r.status for r in results)
     calls = [c for r in results for c in (r.llm_calls or [])]
-    speeds = [c["tokens_per_s"] for c in calls if c.get("tokens_per_s")]
+    turns = [c["num_turns"] for c in calls if c.get("num_turns")]
     done = [r for r in results if r.status == "done"]
     lines = [
         f"対象: {len(results)} 件 / 経過時間: {wall_s / 60:.1f} 分",
         "結果: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())),
-        f"LLM呼び出し: {len(calls)} 回 / 平均 {sum(speeds) / len(speeds):.1f} tokens/s" if speeds else "LLM呼び出し: 0 回",
+        f"Claude Code 実行: {len(calls)} 回 / 平均 {sum(turns) / len(turns):.1f} ターン" if turns else f"Claude Code 実行: {len(calls)} 回",
     ]
     if done:
         lines.append(f"成功1件あたり平均: {sum(r.duration_s for r in done) / len(done):.0f} 秒")
@@ -137,15 +136,10 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
     (out_dir / "_runs").mkdir(exist_ok=True)
     settings.checkpoint_db.parent.mkdir(parents=True, exist_ok=True)
 
-    template = load_template(settings.template_path)
-    llm = None
-    initial_messages = None
-    if args.engine == "claude-code":
-        # 設定ミス（SKILL.md・claudeコマンドがない）は対象ファイルの走査より前に検出する
-        skill = load_skill(settings.claude_skill_path)
-        skill_dir = settings.claude_skill_path.parent
-        initial_messages = partial(build_agent_messages, skill, skill_dir, required_sections(template))
-        llm = build_claude_code(settings, repo, skill_dir)
+    # 設定ミス（SKILL.md・claudeコマンドがない）は対象ファイルの走査より前に検出する
+    skill = load_skill(settings.claude_skill_path)
+    skill_dir = settings.claude_skill_path.parent
+    llm = build_claude_code(settings, repo, skill_dir)
     manifest = Manifest(out_dir / MANIFEST_NAME)
 
     targets: list[tuple[str, str, str]] = []
@@ -161,13 +155,11 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
     if args.limit:
         targets = targets[: args.limit]
 
-    print(f"run_id={args.run_id} engine={args.engine} 対象={len(targets)} 件（変更なしでスキップ={skipped} 件）", flush=True)
+    print(f"run_id={args.run_id} 対象={len(targets)} 件（変更なしでスキップ={skipped} 件）", flush=True)
     if not targets:
         return 0
 
-    await preflight(settings)  # どちらのエンジンもOllamaのモデルを使う
-    if llm is None:
-        llm = build_llm(settings)
+    await preflight(settings)
     metrics_path = out_dir / "_runs" / f"{args.run_id}.jsonl"
     sem = asyncio.Semaphore(settings.concurrency)
     results: list[FileResult] = []
@@ -176,11 +168,9 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
     async with AsyncSqliteSaver.from_conn_string(str(settings.checkpoint_db)) as checkpointer:
         graph = build_doc_graph(
             llm,
-            template,
-            num_ctx=settings.num_ctx,
+            partial(build_agent_messages, skill, skill_dir),
             max_source_chars=settings.max_source_chars,
             max_attempts=settings.max_attempts,
-            initial_messages=initial_messages,
         ).compile(checkpointer=checkpointer)
 
         tasks = [
@@ -212,10 +202,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--out", type=Path, required=True, help="設計書の出力先")
     p.add_argument("--run-id", default=datetime.now().strftime("%Y%m%d-%H%M%S"), help="同じ値を指定すると中断した実行を再開")
     p.add_argument("--limit", type=int, default=0, help="処理件数の上限（PoC用）")
-    p.add_argument(
-        "--engine", choices=["ollama", "claude-code"], default="ollama",
-        help="生成エンジン。比較する場合はエンジンごとに --out と --run-id を分ける",
-    )
     p.add_argument("--force", action="store_true", help="変更のないファイルも再生成する")
     return p.parse_args(argv)
 

@@ -1,7 +1,7 @@
-"""Claude Code（ヘッドレスモード `claude -p`）を生成エンジンとして使うアダプター。
+"""Claude Code（ヘッドレスモード `claude -p`）で設計書を生成するアダプター。
 
 モデルは Ollama の Anthropic 互換APIで動かすため、ソースコードはサーバーの外に出ない。
-doc_graph からは ChatOllama と同じく `ainvoke(messages) -> AIMessage` として扱える。
+doc_graph からは `ainvoke(messages) -> AIMessage` を持つチャットモデルとして扱える。
 再生成では直前の応答に残したセッションIDで `--resume` し、エージェントが読んだ内容を引き継ぐ。
 """
 
@@ -125,10 +125,7 @@ class ClaudeCodeLLM:
             response_metadata={
                 "session_id": data.get("session_id"),
                 "num_turns": data.get("num_turns"),
-                "done_reason": "stop",
-                # 複数ターンの合計なので num_ctx との比較（切り捨て検出）には使わない
-                "prompt_eval_count": None,
-                "eval_count": usage.get("output_tokens"),
+                "output_tokens": usage.get("output_tokens"),
             },
         )
 

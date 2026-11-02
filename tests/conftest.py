@@ -6,14 +6,6 @@ from pathlib import Path
 import pytest
 from langchain_core.messages import AIMessage
 
-TEMPLATE = """# 詳細設計書
-
-<!-- ## これはコメント内なので必須セクションではない -->
-
-## 1. 概要
-## 2. 関数・メソッド仕様
-"""
-
 SAMPLE_GO = """package user
 
 import (
@@ -49,20 +41,16 @@ def good_doc(*identifiers: str) -> str:
     return f"# 詳細設計書\n\n## 1. 概要\n説明 {body}\n\n## 2. 関数・メソッド仕様\n詳細\n"
 
 
-def reply(content: str, *, done_reason: str = "stop", prompt_tokens: int = 1000) -> AIMessage:
+def reply(content: str, *, session_id: str = "s1") -> AIMessage:
+    """ClaudeCodeLLM が返す応答と同じ形。"""
     return AIMessage(
         content=content,
-        response_metadata={
-            "done_reason": done_reason,
-            "prompt_eval_count": prompt_tokens,
-            "eval_count": 500,
-            "eval_duration": 10 * 10**9,
-        },
+        response_metadata={"session_id": session_id, "num_turns": 3, "output_tokens": 500},
     )
 
 
 class ScriptedLLM:
-    """Ollamaの代わりに、用意した応答を順番に返す。受け取ったメッセージも記録する。"""
+    """ClaudeCodeLLM の代わりに、用意した応答を順番に返す。受け取ったメッセージも記録する。"""
 
     def __init__(self, responses):
         self._responses = list(responses)
@@ -76,13 +64,6 @@ class ScriptedLLM:
         if isinstance(item, Exception):
             raise item
         return item
-
-
-@pytest.fixture
-def template_file(tmp_path: Path) -> Path:
-    path = tmp_path / "template.md"
-    path.write_text(TEMPLATE, encoding="utf-8")
-    return path
 
 
 def claude_result(result: str, *, session_id: str = "s1", is_error: bool = False, subtype: str = "success") -> dict:
