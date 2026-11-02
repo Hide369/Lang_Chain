@@ -3,6 +3,7 @@
 使い方:
     python -m godoc_agent.runner --repo /path/to/go-repo --out ./out --limit 5
     python -m godoc_agent.runner --repo /path/to/go-repo --out ./out --run-id 20261102-2100  # 中断した実行を再開
+    python -m godoc_agent.runner --repo /path/to/go-repo --out ./out-cc --engine claude-code  # Claude Code で生成
 """
 
 import argparse
@@ -14,16 +15,18 @@ import time
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 
 from dotenv import load_dotenv
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
+from .claude_code import build_claude_code
 from .config import Settings, load_settings
 from .doc_graph import build_doc_graph
 from .go_source import discover_go_files, sha256_text
 from .llm import build_llm, preflight
-from .prompts import load_template
+from .prompts import build_agent_messages, load_skill, load_template, required_sections
 
 MANIFEST_NAME = ".manifest.json"
 
@@ -135,6 +138,14 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
     settings.checkpoint_db.parent.mkdir(parents=True, exist_ok=True)
 
     template = load_template(settings.template_path)
+    llm = None
+    initial_messages = None
+    if args.engine == "claude-code":
+        # 設定ミス（SKILL.md・claudeコマンドがない）は対象ファイルの走査より前に検出する
+        skill = load_skill(settings.claude_skill_path)
+        skill_dir = settings.claude_skill_path.parent
+        initial_messages = partial(build_agent_messages, skill, skill_dir, required_sections(template))
+        llm = build_claude_code(settings, repo, skill_dir)
     manifest = Manifest(out_dir / MANIFEST_NAME)
 
     targets: list[tuple[str, str, str]] = []
@@ -150,12 +161,13 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
     if args.limit:
         targets = targets[: args.limit]
 
-    print(f"run_id={args.run_id} 対象={len(targets)} 件（変更なしでスキップ={skipped} 件）", flush=True)
+    print(f"run_id={args.run_id} engine={args.engine} 対象={len(targets)} 件（変更なしでスキップ={skipped} 件）", flush=True)
     if not targets:
         return 0
 
-    await preflight(settings)
-    llm = build_llm(settings)
+    await preflight(settings)  # どちらのエンジンもOllamaのモデルを使う
+    if llm is None:
+        llm = build_llm(settings)
     metrics_path = out_dir / "_runs" / f"{args.run_id}.jsonl"
     sem = asyncio.Semaphore(settings.concurrency)
     results: list[FileResult] = []
@@ -168,6 +180,7 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
             num_ctx=settings.num_ctx,
             max_source_chars=settings.max_source_chars,
             max_attempts=settings.max_attempts,
+            initial_messages=initial_messages,
         ).compile(checkpointer=checkpointer)
 
         tasks = [
@@ -199,6 +212,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--out", type=Path, required=True, help="設計書の出力先")
     p.add_argument("--run-id", default=datetime.now().strftime("%Y%m%d-%H%M%S"), help="同じ値を指定すると中断した実行を再開")
     p.add_argument("--limit", type=int, default=0, help="処理件数の上限（PoC用）")
+    p.add_argument(
+        "--engine", choices=["ollama", "claude-code"], default="ollama",
+        help="生成エンジン。比較する場合はエンジンごとに --out と --run-id を分ける",
+    )
     p.add_argument("--force", action="store_true", help="変更のないファイルも再生成する")
     return p.parse_args(argv)
 

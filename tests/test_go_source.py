@@ -41,12 +41,54 @@ func Map[T, U any](b Box[T], f func(T) U) Box[U] { return Box[U]{Value: f(b.Valu
     assert facts.functions == ["Map"]
 
 
-def test_discover_skips_tests_vendor_and_hidden_dirs(tmp_path: Path):
-    for rel in ["main.go", "pkg/a.go", "pkg/a_test.go", "vendor/x/x.go", ".cache/y.go", "pkg/testdata/z.go"]:
-        path = tmp_path / rel
+def write_go_files(root: Path, rel_paths: list[str]) -> None:
+    for rel in rel_paths:
+        path = root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("package x\n", encoding="utf-8")
 
+
+def test_discover_targets_only_api_handler_dirs(tmp_path: Path):
+    write_go_files(tmp_path, [
+        "user_api/pkg/handler/user.go",
+        "user_api/pkg/handler/admin/role.go",
+        "services/order_api/pkg/handler/order.go",
+        "main.go",
+        "user_api/main.go",
+        "user_api/pkg/model/user.go",
+        "user_api/internal/pkg/handler/x.go",
+        "_api/pkg/handler/no_prefix.go",
+        "user_api_v2/pkg/handler/other.go",
+    ])
+
     found = [p.relative_to(tmp_path).as_posix() for p in discover_go_files(tmp_path)]
 
-    assert found == ["main.go", "pkg/a.go"]
+    assert found == [
+        "services/order_api/pkg/handler/order.go",
+        "user_api/pkg/handler/admin/role.go",
+        "user_api/pkg/handler/user.go",
+    ]
+
+
+def test_discover_accepts_api_dir_itself_as_repo(tmp_path: Path):
+    repo = tmp_path / "user_api"
+    write_go_files(repo, ["pkg/handler/user.go", "pkg/model/user.go"])
+
+    found = [p.relative_to(repo).as_posix() for p in discover_go_files(repo)]
+
+    assert found == ["pkg/handler/user.go"]
+
+
+def test_discover_skips_tests_vendor_and_hidden_dirs(tmp_path: Path):
+    handler = "user_api/pkg/handler"
+    write_go_files(tmp_path, [
+        f"{handler}/a.go",
+        f"{handler}/a_test.go",
+        f"{handler}/vendor/x.go",
+        f"{handler}/.cache/y.go",
+        f"{handler}/testdata/z.go",
+    ])
+
+    found = [p.relative_to(tmp_path).as_posix() for p in discover_go_files(tmp_path)]
+
+    assert found == [f"{handler}/a.go"]

@@ -10,13 +10,15 @@ prepare -> generate -> validate -+-> (done)
 
 import re
 import time
+from collections.abc import Callable
+from functools import partial
 from typing import Literal, TypedDict
 
 from langchain_core.runnables import Runnable
 from langchain_core.messages import AIMessage, AnyMessage
 from langgraph.graph import END, START, StateGraph
 
-from .go_source import extract_facts
+from .go_source import GoFacts, extract_facts
 from .prompts import build_feedback, build_messages, required_sections
 
 _FENCE_RE = re.compile(r"^```(?:markdown|md)?\s*\n(.*)\n```\s*$", re.DOTALL)
@@ -24,6 +26,9 @@ _FENCE_RE = re.compile(r"^```(?:markdown|md)?\s*\n(.*)\n```\s*$", re.DOTALL)
 # Ollamaは入力がnum_ctxを超えると先頭を黙って切り捨てる。プロンプトのトークン数が
 # 上限のこの割合に達していたら、切り捨てが起きた可能性が高いとみなす。
 _CTX_OVERFLOW_RATIO = 0.98
+
+# (rel_path, source, facts) -> 最初に送るメッセージ。エンジンごとにプロンプトの組み立て方が異なる
+InitialMessages = Callable[[str, str, GoFacts], list[AnyMessage]]
 
 Status = Literal["pending", "done", "too_large", "context_overflow", "failed_validation"]
 
@@ -55,6 +60,7 @@ def _call_metrics(response: AIMessage, elapsed_s: float) -> dict:
         "prompt_tokens": meta.get("prompt_eval_count"),
         "output_tokens": eval_count,
         "tokens_per_s": round(eval_count / (eval_ns / 1e9), 1) if eval_ns else None,
+        "num_turns": meta.get("num_turns"),  # Claude Code のみ（エージェントのターン数）
     }
 
 
@@ -78,8 +84,11 @@ def build_doc_graph(
     num_ctx: int,
     max_source_chars: int,
     max_attempts: int,
+    initial_messages: InitialMessages | None = None,
 ) -> StateGraph:
     sections = required_sections(template)
+    if initial_messages is None:
+        initial_messages = partial(build_messages, template)
 
     def prepare(state: DocState) -> DocState:
         source = state["source"]
@@ -88,7 +97,7 @@ def build_doc_graph(
         facts = extract_facts(source)
         return {
             "exported": facts.exported,
-            "messages": build_messages(template, state["rel_path"], source, facts),
+            "messages": initial_messages(state["rel_path"], source, facts),
             "attempts": 0,
             "llm_calls": [],
             "status": "pending",
@@ -98,8 +107,12 @@ def build_doc_graph(
         started = time.perf_counter()
         response = await llm.ainvoke(state["messages"])
         metrics = _call_metrics(response, time.perf_counter() - started)
+        draft = _strip_fence(response.content)
+        # 応答メタデータ（Claude Code のセッションIDなど）を残したまま履歴に積み、再生成時に引き継ぐ
+        reply = AIMessage(content=draft, response_metadata=response.response_metadata)
         return {
-            "draft": _strip_fence(response.content),
+            "draft": draft,
+            "messages": state["messages"] + [reply],
             "attempts": state["attempts"] + 1,
             "llm_calls": state["llm_calls"] + [metrics],
         }
@@ -121,7 +134,7 @@ def build_doc_graph(
             return {"status": "failed_validation", "issues": issues}
         return {
             "issues": issues,
-            "messages": state["messages"] + [AIMessage(content=state["draft"]), build_feedback(issues)],
+            "messages": state["messages"] + [build_feedback(issues)],
         }
 
     def generate_or_end(state: DocState) -> str:
