@@ -10,6 +10,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 _EXCLUDED_DIRS = {"vendor", "testdata", ".git", "node_modules"}
+# 設計書の対象は <xx>_api/pkg/handler 配下（サブディレクトリを含む）だけ
+_API_DIR_SUFFIX = "_api"
+_HANDLER_SUBPATH = ("pkg", "handler")
 
 _PACKAGE_RE = re.compile(r"^package\s+(\w+)", re.MULTILINE)
 # func Name( / func (r *Recv) Name( / func Name[T any](
@@ -48,11 +51,27 @@ class GoFacts:
         )
 
 
+def _is_handler_dir(dir_parts: tuple[str, ...]) -> bool:
+    n = len(_HANDLER_SUBPATH)
+    for i in range(len(dir_parts) - n):
+        api_dir = dir_parts[i]
+        if (
+            api_dir.endswith(_API_DIR_SUFFIX)
+            and len(api_dir) > len(_API_DIR_SUFFIX)
+            and dir_parts[i + 1 : i + 1 + n] == _HANDLER_SUBPATH
+        ):
+            return True
+    return False
+
+
 def discover_go_files(repo: Path) -> list[Path]:
     files = []
     for path in repo.rglob("*.go"):
         rel_parts = path.relative_to(repo).parts
         if any(part in _EXCLUDED_DIRS or part.startswith(".") for part in rel_parts[:-1]):
+            continue
+        # --repo に xx_api 自体を指定した場合も判定できるよう、リポジトリ名を含めて調べる
+        if not _is_handler_dir((repo.name, *rel_parts[:-1])):
             continue
         # テストコードは詳細設計書の対象外（運用上の決定。オプションで含めることもできない）
         if path.name.endswith("_test.go"):

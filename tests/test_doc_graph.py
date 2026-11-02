@@ -8,9 +8,10 @@ from godoc_agent.doc_graph import build_doc_graph, find_issues
 ALL_EXPORTED = ("GetUser", "NewService", "Repository", "User")
 
 
-def compile_graph(llm, *, max_attempts=3, max_source_chars=100_000, num_ctx=65536):
+def compile_graph(llm, *, max_attempts=3, max_source_chars=100_000, num_ctx=65536, initial_messages=None):
     graph = build_doc_graph(
-        llm, TEMPLATE, num_ctx=num_ctx, max_source_chars=max_source_chars, max_attempts=max_attempts
+        llm, TEMPLATE, num_ctx=num_ctx, max_source_chars=max_source_chars, max_attempts=max_attempts,
+        initial_messages=initial_messages,
     )
     return graph.compile(checkpointer=InMemorySaver())
 
@@ -50,6 +51,28 @@ async def test_invalid_draft_is_retried_with_feedback():
     assert isinstance(retry_messages[-2], AIMessage)
     assert isinstance(retry_messages[-1], HumanMessage)
     assert "GetUser" in retry_messages[-1].content
+
+
+async def test_retry_keeps_reply_metadata_for_session_resume():
+    first = reply(good_doc("User"))
+    first.response_metadata["session_id"] = "s1"
+    llm = ScriptedLLM([first, reply(good_doc(*ALL_EXPORTED))])
+
+    await run(compile_graph(llm))
+
+    # Claude Code はこのメタデータのセッションIDで --resume する
+    assert llm.calls[1][-2].response_metadata["session_id"] == "s1"
+
+
+async def test_custom_initial_messages_replace_default_prompt():
+    llm = ScriptedLLM([reply(good_doc(*ALL_EXPORTED))])
+
+    def agent_prompt(rel_path, source, facts):
+        return [HumanMessage(f"{rel_path} を読んで作成: {', '.join(facts.exported)}")]
+
+    await run(compile_graph(llm, initial_messages=agent_prompt))
+
+    assert [m.content for m in llm.calls[0]] == ["user/service.go を読んで作成: GetUser, NewService, Repository, User"]
 
 
 async def test_gives_up_after_max_attempts():

@@ -27,6 +27,11 @@ class Settings:
     max_attempts: int
     template_path: Path
     checkpoint_db: Path
+    # --engine claude-code 用
+    claude_bin: str
+    claude_skill_path: Path | None
+    claude_max_turns: int
+    claude_timeout_s: int
 
     @property
     def max_source_chars(self) -> int:
@@ -48,4 +53,9 @@ def load_settings() -> Settings:
         max_attempts=_int_env("DOC_MAX_ATTEMPTS", 3),
         template_path=Path(os.getenv("DOC_TEMPLATE_PATH", base_dir / "prompts" / "design_doc_template.md")),
         checkpoint_db=Path(os.getenv("CHECKPOINT_DB", base_dir / "state" / "checkpoints.sqlite")),
+        claude_bin=os.getenv("CLAUDE_BIN", "claude"),
+        claude_skill_path=Path(skill) if (skill := os.getenv("CLAUDE_SKILL_PATH")) else None,
+        claude_max_turns=_int_env("CLAUDE_MAX_TURNS", 30),
+        # エージェントはファイルを読みながら複数回LLMを呼ぶため、1回の呼び出しより長く取る
+        claude_timeout_s=_int_env("CLAUDE_TIMEOUT_S", 1800),
     )
