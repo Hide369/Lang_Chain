@@ -22,12 +22,9 @@ class Settings:
     model: str
     num_ctx: int
     num_predict: int
-    timeout_s: int
     concurrency: int
     max_attempts: int
-    template_path: Path
     checkpoint_db: Path
-    # --engine claude-code 用
     claude_bin: str
     claude_skill_path: Path | None
     claude_max_turns: int
@@ -35,9 +32,9 @@ class Settings:
 
     @property
     def max_source_chars(self) -> int:
-        # Ollamaはコンテキスト超過を「黙って切り捨てる」ため、送る前に弾く。
-        # 1トークン≒3文字（Goコード+日本語の保守的な見積り）とし、
-        # テンプレート・出力分として半分をLLMの作業領域に残す。
+        # Ollamaはコンテキスト超過を「黙って切り捨てる」ため、大きすぎるファイルは送る前に弾く。
+        # 1トークン≒3文字（Goコード+日本語の保守的な見積り）とし、Claude Code の指示文・
+        # スキル・関連ファイル・出力の分として半分をエージェントの作業領域に残す。
         return self.num_ctx * 3 // 2
 
 
@@ -48,14 +45,12 @@ def load_settings() -> Settings:
         model=os.getenv("LLM_MODEL", "qwen3-coder-next"),
         num_ctx=_int_env("LLM_NUM_CTX", 65536, minimum=4096),
         num_predict=_int_env("LLM_NUM_PREDICT", 8192),
-        timeout_s=_int_env("LLM_TIMEOUT_S", 600),
         concurrency=_int_env("LLM_CONCURRENCY", 2),
         max_attempts=_int_env("DOC_MAX_ATTEMPTS", 3),
-        template_path=Path(os.getenv("DOC_TEMPLATE_PATH", base_dir / "prompts" / "design_doc_template.md")),
         checkpoint_db=Path(os.getenv("CHECKPOINT_DB", base_dir / "state" / "checkpoints.sqlite")),
         claude_bin=os.getenv("CLAUDE_BIN", "claude"),
         claude_skill_path=Path(skill) if (skill := os.getenv("CLAUDE_SKILL_PATH")) else None,
         claude_max_turns=_int_env("CLAUDE_MAX_TURNS", 30),
-        # エージェントはファイルを読みながら複数回LLMを呼ぶため、1回の呼び出しより長く取る
+        # エージェントはファイルを読みながら複数回LLMを呼ぶため、長めに取る
         claude_timeout_s=_int_env("CLAUDE_TIMEOUT_S", 1800),
     )

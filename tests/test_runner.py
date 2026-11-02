@@ -28,8 +28,16 @@ def repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def env(monkeypatch, tmp_path: Path, template_file: Path):
-    monkeypatch.setenv("DOC_TEMPLATE_PATH", str(template_file))
+def skill_file(tmp_path: Path) -> Path:
+    path = tmp_path / "skills" / "go-design-doc" / "SKILL.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("# 詳細設計書スキル\n手順...\n", encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def env(monkeypatch, tmp_path: Path, skill_file: Path):
+    monkeypatch.setenv("CLAUDE_SKILL_PATH", str(skill_file))
     monkeypatch.setenv("CHECKPOINT_DB", str(tmp_path / "state" / "cp.sqlite"))
     monkeypatch.setenv("LLM_CONCURRENCY", "1")  # 応答の順序を決定的にする
 
@@ -40,7 +48,7 @@ def env(monkeypatch, tmp_path: Path, template_file: Path):
 
 
 def use_llm(monkeypatch, llm: ScriptedLLM) -> None:
-    monkeypatch.setattr(runner, "build_llm", lambda settings: llm)
+    monkeypatch.setattr(runner, "build_claude_code", lambda settings, repo, skill_dir: llm)
 
 
 async def run_batch(repo: Path, out: Path, *extra: str) -> int:
@@ -64,7 +72,7 @@ async def test_generates_docs_and_skips_unchanged_files_next_time(env, monkeypat
 
 async def test_one_failing_file_does_not_stop_the_batch(env, monkeypatch, repo, tmp_path):
     out = tmp_path / "out"
-    # health.go → 失敗（with_retryは偽LLMには掛からないため1回で失敗扱い）、user.go → 成功
+    # health.go → 失敗、user.go → 成功
     use_llm(monkeypatch, ScriptedLLM([ValueError("boom"), reply(good_doc("GetUser"))]))
 
     assert await run_batch(repo, out) == 1
@@ -78,7 +86,7 @@ async def test_one_failing_file_does_not_stop_the_batch(env, monkeypatch, repo, 
 
 async def test_rerun_with_same_run_id_resumes_failed_session(env, monkeypatch, repo, tmp_path):
     out = tmp_path / "out"
-    use_llm(monkeypatch, ScriptedLLM([ConnectionError("down"), reply(good_doc("GetUser"))]))
+    use_llm(monkeypatch, ScriptedLLM([RuntimeError("claude crashed"), reply(good_doc("GetUser"))]))
     assert await run_batch(repo, out) == 1
 
     # 同じrun_idで再実行すると、失敗したhealth.goだけがチェックポイントから再開される
@@ -89,31 +97,20 @@ async def test_rerun_with_same_run_id_resumes_failed_session(env, monkeypatch, r
     assert (out / f"{HEALTH}.md").is_file()
 
 
-@pytest.fixture
-def skill_file(tmp_path: Path) -> Path:
-    path = tmp_path / "skills" / "go-design-doc" / "SKILL.md"
-    path.parent.mkdir(parents=True)
-    path.write_text("# 詳細設計書スキル\n手順...\n", encoding="utf-8")
-    return path
-
-
 def option(argv: list[str], name: str) -> str:
     return argv[argv.index(name) + 1]
 
 
-async def test_claude_code_engine_runs_agent_in_repo_and_retries_in_same_session(
-    env, monkeypatch, repo, tmp_path, fake_claude, skill_file
-):
+async def test_runs_claude_code_in_repo_and_retries_in_same_session(env, monkeypatch, repo, tmp_path, fake_claude):
     monkeypatch.setenv("CLAUDE_BIN", fake_claude.bin)
-    monkeypatch.setenv("CLAUDE_SKILL_PATH", str(skill_file))
     fake_claude.respond(
         claude_result(good_doc("Health"), session_id="s-health"),
-        claude_result("見出しなし", session_id="s-user"),
+        claude_result("識別子の記載なし", session_id="s-user"),
         claude_result(good_doc("GetUser"), session_id="s-user"),
     )
     out = tmp_path / "out"
 
-    assert await run_batch(repo, out, "--engine", "claude-code") == 0
+    assert await run_batch(repo, out) == 0
 
     assert (out / f"{HEALTH}.md").read_text(encoding="utf-8").startswith("# 詳細設計書")
     assert (out / f"{USER}.md").is_file()
@@ -126,11 +123,11 @@ async def test_claude_code_engine_runs_agent_in_repo_and_retries_in_same_session
     assert option(calls[2]["argv"], "--resume") == "s-user"
 
 
-async def test_claude_code_engine_requires_skill_path(env, monkeypatch, repo, tmp_path):
-    monkeypatch.delenv("CLAUDE_SKILL_PATH", raising=False)
+async def test_requires_skill_path(env, monkeypatch, repo, tmp_path):
+    monkeypatch.delenv("CLAUDE_SKILL_PATH")
 
     with pytest.raises(ValueError, match="CLAUDE_SKILL_PATH"):
-        await run_batch(repo, tmp_path / "out", "--engine", "claude-code")
+        await run_batch(repo, tmp_path / "out")
 
 
 def test_thread_id_is_stable_per_run_and_path():

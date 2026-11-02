@@ -113,15 +113,13 @@ def test_load_skill_requires_existing_path(tmp_path):
         load_skill(tmp_path / "SKILL.md")
 
 
-def test_agent_messages_embed_skill_and_list_required_headings(tmp_path):
+def test_agent_messages_embed_skill_and_target_file(tmp_path):
     facts = extract_facts("package h\n\nfunc GetUser() {}\n")
 
-    system, human = build_agent_messages(
-        "スキル本文 {placeholder}", tmp_path, ["1. 概要", "2. 関数仕様"], "user_api/pkg/handler/user.go", "", facts
-    )
+    system, human = build_agent_messages("スキル本文 {placeholder}", tmp_path, "user_api/pkg/handler/user.go", facts)
 
+    # スキル内の波括弧はそのまま残る（format の置換対象にならない）
     assert "スキル本文 {placeholder}" in system.content
     assert str(tmp_path) in system.content
     assert "user_api/pkg/handler/user.go" in human.content
-    assert "- ## 1. 概要\n- ## 2. 関数仕様" in human.content
     assert "GetUser" in human.content
