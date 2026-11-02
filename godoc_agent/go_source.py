@@ -48,13 +48,14 @@ class GoFacts:
         )
 
 
-def discover_go_files(repo: Path, include_tests: bool = False) -> list[Path]:
+def discover_go_files(repo: Path) -> list[Path]:
     files = []
     for path in repo.rglob("*.go"):
         rel_parts = path.relative_to(repo).parts
         if any(part in _EXCLUDED_DIRS or part.startswith(".") for part in rel_parts[:-1]):
             continue
-        if not include_tests and path.name.endswith("_test.go"):
+        # テストコードは詳細設計書の対象外（運用上の決定。オプションで含めることもできない）
+        if path.name.endswith("_test.go"):
             continue
         files.append(path)
     return sorted(files)
