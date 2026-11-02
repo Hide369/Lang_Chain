@@ -48,7 +48,5 @@ def test_discover_skips_tests_vendor_and_hidden_dirs(tmp_path: Path):
         path.write_text("package x\n", encoding="utf-8")
 
     found = [p.relative_to(tmp_path).as_posix() for p in discover_go_files(tmp_path)]
-    with_tests = [p.relative_to(tmp_path).as_posix() for p in discover_go_files(tmp_path, include_tests=True)]
 
     assert found == ["main.go", "pkg/a.go"]
-    assert with_tests == ["main.go", "pkg/a.go", "pkg/a_test.go"]

@@ -139,7 +139,7 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
 
     targets: list[tuple[str, str, str]] = []
     skipped = 0
-    for path in discover_go_files(repo, include_tests=args.include_tests):
+    for path in discover_go_files(repo):
         rel_path = path.relative_to(repo).as_posix()
         source = path.read_text(encoding="utf-8")
         source_hash = sha256_text(source)
@@ -199,7 +199,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--out", type=Path, required=True, help="設計書の出力先")
     p.add_argument("--run-id", default=datetime.now().strftime("%Y%m%d-%H%M%S"), help="同じ値を指定すると中断した実行を再開")
     p.add_argument("--limit", type=int, default=0, help="処理件数の上限（PoC用）")
-    p.add_argument("--include-tests", action="store_true", help="_test.go も対象にする")
     p.add_argument("--force", action="store_true", help="変更のないファイルも再生成する")
     return p.parse_args(argv)
 
