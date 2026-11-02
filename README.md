@@ -14,7 +14,7 @@ LangGraph は、その外側で並列制御・差分スキップ・再開・検�
 - ソースのハッシュを `out/.manifest.json` に記録し、変更のないファイルは次回以降スキップする
 - 設計書の構成・書き方は SKILL.md に任せる。検証するのは、本文が空でないことと、公開識別子（静的解析で抽出）がすべて記載されていることだけ
 - 設計書の対象は **`<xx>_api/pkg/handler/` 配下（サブディレクトリを含む）のGoファイルだけ**（`xx` は任意）
-  - `--repo` には、複数の `xx_api` を含む親ディレクトリと、`xx_api` 自体のどちらを指定してもよい
+  - `--repo` には、複数の `xx_api` を含む親ディレクトリと、`xx_api` 自体のどちらを指定してもよい（複数の API を扱うなら親ディレクトリを推奨。「3. 設計書を取得する」の注意を参照）
   - 例：対象 `user_api/pkg/handler/user.go`、`user_api/pkg/handler/admin/role.go` ／ 対象外 `user_api/pkg/model/user.go`、`user_api/internal/pkg/handler/x.go`
 - 上記の配下でも、次のファイルは対象外（常に除外され、オプションで含めることはできない）
   - テストコード（ファイル名が `_test.go` で終わるもの）
@@ -113,6 +113,14 @@ python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --run-id nightl
 
 `--repo` はサーバー上のパスとして直接読み込まれる。クライアントからソースを送る機能はない。
 
+置き場所は任意で、このREADMEの `/srv/repos/myapp` は例にすぎない。置いたパスを `--repo` に指定すればよい。
+
+- `/srv` 配下は管理者権限が必要なため、先に実行ユーザーが書き込めるようにする（例：`sudo mkdir -p /srv/repos && sudo chown $USER /srv/repos`）。こだわりがなければ `~/repos/myapp` などホームディレクトリ配下が手軽
+- runner はGoソースを読むだけで、リポジトリの中身は変更しない
+- `xx_api` が複数ある場合は、**それらの親ディレクトリを `--repo` に指定する**（理由は「3. 設計書を取得する」の注意を参照）
+
+置き方:
+
 - **git（推奨）**：サーバーで `git clone` し、実行前に `git pull` する。どのコミットから生成したかが明確になる
 - **転送**：未コミットの変更も対象にしたい場合は `rsync` / `scp -r` でサーバーへコピーする
 
@@ -168,8 +176,29 @@ PCを再起動した後は、ログの末尾にサマリー（`対象: ... 件 /
 
 ### 3. 設計書を取得する
 
-設計書はサーバー上の `--out` 配下に、Goファイルと同じフォルダ構成で `<相対パス>.go.md` として作られる
-（同じ場所に `.manifest.json` と `_runs/*.jsonl` も置かれる）。
+設計書はサーバー上の `--out` 配下に、Goファイルと同じフォルダ構成で `<--repo からの相対パス>.go.md` として作られる。
+`--out ./out` のような相対パスは実行時のカレントディレクトリが基準になるため、このREADMEの手順（`/opt/Lang_Chain` で実行）では `/opt/Lang_Chain/out/` になる。
+
+```
+--repo /srv/repos/myapp  --out ./out （/opt/Lang_Chain で実行）の場合
+
+/srv/repos/myapp/user_api/pkg/handler/user.go    → /opt/Lang_Chain/out/user_api/pkg/handler/user.go.md
+/srv/repos/myapp/order_api/pkg/handler/order.go  → /opt/Lang_Chain/out/order_api/pkg/handler/order.go.md
+/opt/Lang_Chain/out/.manifest.json                 … 生成済みファイルの記録（差分スキップ用）
+/opt/Lang_Chain/out/_runs/<run-id>.jsonl           … 計測ログ
+```
+
+> **注意：`--repo` に `xx_api` 自体を指定する場合**
+> 出力パスに API 名が含まれなくなるため、複数の API を同じ `--out` に出力すると、同名ファイルが上書きされ `.manifest.json` も混ざる。
+>
+> ```
+> --repo /srv/repos/user_api  → out/pkg/handler/user.go.md
+> --repo /srv/repos/order_api → out/pkg/handler/order.go.md   ← 同じ out に混在する
+> ```
+>
+> `xx_api` の親ディレクトリを `--repo` に指定する（推奨）か、API ごとに `--out ./out/user_api` のように出力先を分けること。
+
+クライアントへの取得方法:
 
 ```powershell
 # scp でクライアントへコピー
