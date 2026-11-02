@@ -63,11 +63,79 @@ python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --run-id nightl
 
 終了コード: `0` 全件成功 / `1` 一部失敗（詳細は計測ログ） / `2` 設定・接続エラーで開始できず
 
-### クライアント(Claude Code)からの起動
+## クライアント(Claude Code)からの運用
+
+処理はすべてサーバー上で完結する。クライアントの役割は「Goソースの更新」「起動」「成果物の取得」だけ。
+
+```
+クライアント                         サーバー(GB10)
+  Goソース ──(git push / rsync)──>  /srv/repos/myapp      ← --repo で読む
+  ssh で起動 ───────────────────>  runner（tmux / nohup で常駐）── Ollama
+  設計書 <──(scp / git pull)──────  /opt/Lang_Chain/out   ← --out に書く
+```
+
+### 1. Goリポジトリをサーバーに置く
+
+`--repo` はサーバー上のパスとして直接読み込まれる。クライアントからソースを送る機能はない。
+
+- **git（推奨）**：サーバーで `git clone` し、実行前に `git pull` する。どのコミットから生成したかが明確になる
+- **転送**：未コミットの変更も対象にしたい場合は `rsync` / `scp -r` でサーバーへコピーする
+
+### 2. SSHが切れても止まらないように起動する
+
+`ssh gb10 "python -m godoc_agent.runner ..."` のように直接起動すると、プロセスがSSHセッションにぶら下がる。
+次の場合はサーバー側の処理も止まるため、**全件実行では必ず tmux か nohup で切り離す**。
+
+- クライアントPCのシャットダウン・スリープ、ネットワーク切断でSSHが切れる
+- Claude Code の Bash ツールの時間上限（最大10分）で打ち切られる
+
+```bash
+# A. tmux（後から接続して進捗を見られる。推奨）
+ssh gb10 "tmux new -d -s godoc 'cd /opt/Lang_Chain && mkdir -p out/_runs && .venv/bin/python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --run-id nightly-20261102 2>&1 | tee out/_runs/nightly-20261102.log'"
+
+# B. nohup（tmuxがない場合）
+ssh gb10 "cd /opt/Lang_Chain && mkdir -p out/_runs && nohup .venv/bin/python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --run-id nightly-20261102 > out/_runs/nightly-20261102.log 2>&1 < /dev/null &"
+```
+
+- **`--run-id` は必ず明示する**。省略すると実行のたびに日時から新しい値が作られ、中断した実行を再開できない
+- 起動後はクライアントPCを落としてよい。万一止まっても、同じ `--run-id` で再実行すれば完了済みのファイルを飛ばして続きから再開する
+- `--limit 5` 程度のPoC実行なら、10分以内に終わる見込みがあれば直接起動でもよい
+
+進捗の確認:
+
+```bash
+ssh gb10 "tail -n 20 /opt/Lang_Chain/out/_runs/nightly-20261102.log"   # ログの末尾
+ssh -t gb10 tmux attach -t godoc                                        # tmuxの場合（Ctrl-b d で離脱）
+```
+
+### 3. 設計書を取得する
+
+設計書はサーバー上の `--out` 配下に、Goファイルと同じフォルダ構成で `<相対パス>.go.md` として作られる
+（同じ場所に `.manifest.json` と `_runs/*.jsonl` も置かれる）。
 
 ```powershell
-ssh gb10 "cd /opt/Lang_Chain && .venv/bin/python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --limit 5"
+# scp でクライアントへコピー
+scp -r gb10:/opt/Lang_Chain/out ./design-docs
 ```
+
+または `--out /srv/repos/myapp/docs/design` のようにGoリポジトリ内へ出力し、サーバーでコミット・pushすれば、クライアントは `git pull` で受け取れる。
+
+## テンプレートの作り方（Claude Code の SKILL.md からの移行）
+
+[prompts/design_doc_template.md](prompts/design_doc_template.md) は2つの用途で使われるため、SKILL.md をそのまま貼り替えてはいけない。
+
+1. **LLMへのプロンプト**：ファイル全体（HTMLコメントを含む）がそのままLLMに渡される
+2. **検証の基準**：HTMLコメント外の `## ` 見出しがすべて「必須セクション」となり、生成結果に**完全一致**で含まれないと再生成される
+
+移行時のルール:
+
+- `## ` は「設計書に必ず出力する固定の見出し」だけに使う。`## 手順` `## ルール` のような説明用の見出しを残すと、検証が通らず `failed_validation` になる
+- 記述ルールや記入例は `<!-- -->` の中に書く（LLMには届くが、必須セクションの判定からは外れる）
+- 関数ごとなど繰り返す見出しは `### {{関数名}}` のように `###` 以下にする
+- YAML frontmatter（`name:` / `description:`）は削除する
+- Read / Write / Glob などツール操作の手順は削除する（サーバー側のLLMはツールを使えない。ソースはプロンプトに含まれ、保存は runner が行う）
+- 別ファイル（references/ など）を参照している場合は、その内容をこのファイルに直接書き込む
+- テンプレートは毎回プロンプトに入るため、長すぎると `context_overflow` が増える。記入例は短いものを1つ残す程度がよい
 
 ## 計測（PoCの判断材料）
 
