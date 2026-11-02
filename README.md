@@ -7,6 +7,9 @@ GB10サーバー上で動かし、クライアントのClaude CodeからSSH経�
 モデルは Ollama の Anthropic 互換API経由で qwen3-coder-next を使うため、ソースコードはサーバーの外に出ない。
 LangGraph は、その外側で並列制御・差分スキップ・再開・検証・計測を受け持つ。
 
+runner は常駐サービスではなく、起動すると対象ファイルを処理して終了する**バッチ**である（常駐するのは Ollama だけ）。
+必要なときに起動するか、[定期実行（systemd タイマー）](#定期実行systemd-タイマー) で毎晩自動実行する。
+
 ## 設計方針（方式A：1ファイル = 1セッション）
 
 - Goファイル1本ごとに独立した `thread_id` でグラフを実行する。前のファイルのコンテキストは一切持ち込まない
@@ -206,6 +209,60 @@ scp -r gb10:/opt/Lang_Chain/out ./design-docs
 ```
 
 または `--out /srv/repos/myapp/docs/design` のようにGoリポジトリ内へ出力し、サーバーでコミット・pushすれば、クライアントは `git pull` で受け取れる。
+
+## 定期実行（systemd タイマー）
+
+毎晩決まった時刻に、Goリポジトリを `git pull` してから設計書を生成する。変更のないファイルはスキップされるため、毎日実行しても処理されるのは変更されたファイルだけ。
+
+| ファイル | 役割 |
+|---|---|
+| [deploy/nightly.sh](deploy/nightly.sh) | `git pull --ff-only` → runner 実行。`git pull` に失敗したら生成しない（古いソースから作らないため） |
+| [deploy/systemd/godoc-nightly.service](deploy/systemd/godoc-nightly.service) | 上のスクリプトを1回実行する（実行ユーザー・Goリポジトリのパスをここで指定） |
+| [deploy/systemd/godoc-nightly.timer](deploy/systemd/godoc-nightly.timer) | 毎日 2:00 に service を起動する |
+
+### 設置
+
+前提：README「サーバー(GB10)へのセットアップ」が済み、手動実行で設計書が生成できていること。
+
+```bash
+cd /opt/Lang_Chain
+
+# 1. .env の CLAUDE_BIN を claude のフルパスにする（systemd の PATH には ~/.local/bin が入らない）
+which claude          # 例: /home/<ユーザー>/.local/bin/claude → CLAUDE_BIN=/home/<ユーザー>/.local/bin/claude
+
+# 2. 実行ユーザーで、Goリポジトリの git pull がパスワード入力なしでできることを確認する（SSH鍵・デプロイキーなど）
+git -C /srv/repos/myapp pull --ff-only
+
+# 3. 手動でスクリプトを試す
+GODOC_REPO=/srv/repos/myapp ./deploy/nightly.sh
+
+# 4. unit ファイルを設置する（実行ユーザーを自分に置き換え）
+sed "s/REPLACE_WITH_USER/$USER/" deploy/systemd/godoc-nightly.service | sudo tee /etc/systemd/system/godoc-nightly.service
+sudo cp deploy/systemd/godoc-nightly.timer /etc/systemd/system/
+sudo systemctl edit --full godoc-nightly.service   # GODOC_REPO（・GODOC_OUT）を実際のパスに直す
+
+# 5. タイマーを有効化
+sudo systemctl daemon-reload
+sudo systemctl enable --now godoc-nightly.timer
+systemctl list-timers godoc-nightly.timer          # 次回の実行予定を確認
+```
+
+### 運用
+
+```bash
+sudo systemctl start godoc-nightly.service          # 今すぐ1回実行する（終わるまで戻らない。--no-block で即座に戻る）
+systemctl status godoc-nightly.service              # 直近の結果（一部失敗・git pull失敗は failed と表示される）
+journalctl -u godoc-nightly.service -n 50           # 実行ログ
+tail -n 20 /opt/Lang_Chain/out/_runs/nightly-$(date +%Y%m%d).log   # 同じ内容のファイルログ
+sudo systemctl disable --now godoc-nightly.timer    # 定期実行を止める
+```
+
+- 実行時刻を変えるには `sudo systemctl edit --full godoc-nightly.timer` で `OnCalendar=` を直す（例：`*-*-* 23:30:00`）
+- `--run-id` は `nightly-<日付>`。同じ日に `systemctl start` で再実行すると、中断・失敗したファイルの続きから再開する
+- 実行時刻にサーバーが停止していた場合は、起動後に実行される（`Persistent=true`）
+- 前回の実行が終わっていなければ、次の起動は行われない（systemd が二重起動を防ぐ）。12時間を超えると強制終了する（`TimeoutStartSec=12h`）
+- 夜間実行中に、同じ `--out` へ手動実行を重ねないこと（差分スキップの記録が混ざる）
+- 設計書の取得方法は、手動実行と同じ（「3. 設計書を取得する」）
 
 ## 計測（PoCの判断材料）
 

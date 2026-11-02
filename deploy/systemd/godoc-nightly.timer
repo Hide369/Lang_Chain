@@ -1,0 +1,10 @@
+[Unit]
+Description=Go詳細設計書の夜間生成（毎日 2:00）
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+# 実行時刻にサーバーが停止していた場合は、起動後に実行する
+Persistent=true
+
+[Install]
+WantedBy=timers.target
