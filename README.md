@@ -98,8 +98,8 @@ ssh gb10 "cd /opt/Lang_Chain && mkdir -p out/_runs && nohup .venv/bin/python -m 
 ```
 
 - **`--run-id` は必ず明示する**。省略すると実行のたびに日時から新しい値が作られ、中断した実行を再開できない
-- 起動後はクライアントPCを落としてよい。万一止まっても、同じ `--run-id` で再実行すれば完了済みのファイルを飛ばして続きから再開する
-- `--limit 5` 程度のPoC実行なら、10分以内に終わる見込みがあれば直接起動でもよい
+- 万一止まっても、同じ `--run-id` で再実行すれば完了済みのファイルを飛ばして続きから再開する
+- `--limit 5` 程度のPoC実行なら、10分以内に終わる見込みがあれば直接起動でもよい（この場合はPCを落とすと止まる）
 
 進捗の確認:
 
@@ -107,6 +107,29 @@ ssh gb10 "cd /opt/Lang_Chain && mkdir -p out/_runs && nohup .venv/bin/python -m 
 ssh gb10 "tail -n 20 /opt/Lang_Chain/out/_runs/nightly-20261102.log"   # ログの末尾
 ssh -t gb10 tmux attach -t godoc                                        # tmuxの場合（Ctrl-b d で離脱）
 ```
+
+### クライアントPCを落としてよいか
+
+tmux / nohup で起動していれば、**起動後はクライアントPCを落としてよい**。落とす前に次の2点を確認する。
+
+1. 起動コマンドが戻ってきている（tmux / nohup はバックグラウンドに切り離して即座に戻る）
+2. サーバーで処理が始まっている
+
+   ```bash
+   ssh gb10 "tail -n 5 /opt/Lang_Chain/out/_runs/nightly-20261102.log"
+   ```
+
+   `run_id=... 対象=N 件` の後に `[1/N] done ...` のような進捗行が出ていればよい。すぐに `エラー:` が出ている場合は、Ollamaへの接続や設定を見直す
+
+クライアントPCを落としても、サーバー側の要因では処理が止まる。
+
+| 要因 | 対策 |
+|---|---|
+| GB10 のスリープ・自動サスペンド（Ubuntuデスクトップ版では既定で有効な場合がある） | `sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target` で無効にする |
+| サーバーの再起動、Ollama の停止 | 同じ `--run-id` で再実行すれば続きから再開する |
+
+PCを再起動した後は、ログの末尾にサマリー（`対象: ... 件 / 経過時間: ...`）が出ていれば完了している。
+失敗した件があった場合や途中で止まっていた場合は、同じ `--run-id` で再実行すると残りだけが処理される。完了したら次の手順で設計書を取得する。
 
 ### 3. 設計書を取得する
 
