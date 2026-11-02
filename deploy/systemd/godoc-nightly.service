@@ -1,0 +1,15 @@
+[Unit]
+Description=Go詳細設計書の夜間生成
+Wants=network-online.target ollama.service
+After=network-online.target ollama.service
+
+[Service]
+Type=oneshot
+# 設置時に実行ユーザーへ置き換える（README「定期実行」参照）。Goリポジトリの git pull ができるユーザーにすること
+User=REPLACE_WITH_USER
+Environment=GODOC_REPO=/srv/repos/myapp
+# 出力先を変える場合（既定: /opt/Lang_Chain/out）
+#Environment=GODOC_OUT=/opt/Lang_Chain/out
+ExecStart=/opt/Lang_Chain/deploy/nightly.sh
+# 全件の生成は長時間かかるが、ハングしたまま翌日の実行を妨げないよう上限を設ける
+TimeoutStartSec=12h
