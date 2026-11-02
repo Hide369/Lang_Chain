@@ -108,9 +108,40 @@ python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --run-id nightl
 ```
 クライアント                         サーバー(GB10)
   Goソース ──(git push / rsync)──>  /srv/repos/myapp      ← --repo で読む
-  ssh で起動 ───────────────────>  runner（tmux / nohup で常駐）── Claude Code ── Ollama
+  ssh で起動 ───────────────────>  runner（tmux / nohup で切り離して実行）── Claude Code ── Ollama
   設計書 <──(scp / git pull)──────  /opt/Lang_Chain/out   ← --out に書く
 ```
+
+### 作業の分担：初回だけの準備と、その後の運用
+
+**SSHで接続できれば、すべての作業をクライアントから行える**（サーバーの前で作業する必要はない）。
+ただし、Pythonファイルを置くだけでは動かない。最初に1回だけ、次の準備を SSH 経由で行う。
+
+| 初回だけの準備（詳細は「サーバー(GB10)へのセットアップ」） | sudo |
+|---|---|
+| Ollama の設定（コンテキスト長など）とモデルの確認 | 要 |
+| Claude Code のインストール | 不要 |
+| このリポジトリの clone、venv 作成、`pip install` | `/opt` 配下なら要 |
+| `.env` の作成（`CLAUDE_SKILL_PATH`・`CLAUDE_BIN` など） | 不要 |
+| SKILL.md をクライアントから `scp` で配置 | 不要 |
+| Goリポジトリの clone と、パスワードなしで `git pull` できる設定（SSH鍵など） | 不要 |
+| GB10 のスリープ無効化（「クライアントPCを落としてよいか」参照） | 要 |
+| 定期実行タイマーの設置（使う場合。「定期実行（systemd タイマー）」参照） | 要 |
+
+準備が済んだ後の運用は、すべてクライアントからのコマンドで完結する。
+
+| 作業 | クライアントからの操作 |
+|---|---|
+| 設計書の生成 | 手動なら `ssh gb10 "tmux new -d ..."`（「2. SSHが切れても止まらないように起動する」）。定期実行なら毎晩自動 |
+| 進捗・結果の確認 | `ssh gb10 "tail -n 20 /opt/Lang_Chain/out/_runs/<run-id>.log"` / `ssh gb10 systemctl status godoc-nightly.service` |
+| 設計書の取得 | `scp -r gb10:/opt/Lang_Chain/out ./design-docs` |
+| SKILL.md の更新 | `scp` で上書きする（次の実行から反映される） |
+| このリポジトリの更新 | `ssh gb10 "cd /opt/Lang_Chain && git pull && .venv/bin/pip install -r requirements.txt"` |
+
+注意:
+
+- **sudo が必要な作業は、クライアントの Claude Code には任せられない**。Claude Code のコマンド実行は非対話のため、パスワード入力で失敗する。sudo が必要な作業は、自分のターミナルで `ssh -t gb10 "sudo ..."` のように実行する。それ以外の作業は Claude Code に依頼してよい
+- 停電などでサーバーが停止した後の電源投入は、物理的な操作（またはリモート電源管理）が必要。起動すれば Ollama は自動で立ち上がり、定期実行も逃した分を起動後に実行する
 
 ### 1. Goリポジトリをサーバーに置く
 
