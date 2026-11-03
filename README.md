@@ -48,6 +48,8 @@ generate の中身（ファイルごと）:
 | [godoc_agent/go_source.py](godoc_agent/go_source.py) | 対象Goファイルの列挙、関数・型などの事実抽出（簡易版）、コメント以外の差分検出 |
 | [godoc_agent/preflight.py](godoc_agent/preflight.py) | 開始前の Ollama 接続・モデル存在チェック |
 
+起動から終了までの処理の流れ（再開判定・検証・保存・終了コードなど）は [docs/workflow.md](docs/workflow.md) にまとめている。
+
 ## サーバー(GB10)へのセットアップ
 
 ```bash
