@@ -73,7 +73,11 @@ pip install -r requirements.txt
 cp .env.example .env  # CLAUDE_SKILL_PATH・LLM_MODEL などを編集
 
 # 4. 既存のスキルをサーバーに置く（クライアントから実行。参照ファイルがあればフォルダごと）
-scp -r ~/.claude/skills/<スキル名> gb10:/opt/Lang_Chain/skills/
+scp -r ~/.claude/skills/<設計書スキル名> gb10:/opt/Lang_Chain/skills/
+scp -r ~/.claude/skills/<コメント追記スキル名> gb10:/opt/Lang_Chain/skills/   # コメント追記も行う場合
+#    置いた SKILL.md のパスを .env に書く
+#      CLAUDE_SKILL_PATH=/opt/Lang_Chain/skills/<設計書スキル名>/SKILL.md
+#      CLAUDE_COMMENT_SKILL_PATH=/opt/Lang_Chain/skills/<コメント追記スキル名>/SKILL.md
 
 # 5. テスト（Ollama・Claude Code 不要）
 pytest
@@ -99,6 +103,18 @@ Ollama の接続先（`ANTHROPIC_BASE_URL` など）は runner が `claude` の�
 
 `.env` に `CLAUDE_COMMENT_SKILL_PATH`（コメント追記スキルの SKILL.md）を設定すると、設計書の生成と同じ実行の中で、対象の各Goファイルにコメントを追記する。
 スキルの置き方・扱い（全文をシステムプロンプトに入れる、日付を渡す、ファイル編集をさせない等）は設計書のスキルと同じ。
+
+設置手順（設定済みのサーバーに後から追加する場合）:
+
+```bash
+# クライアントから、スキルのフォルダごとサーバーへ送る（設計書スキルと同じ skills/ 配下）
+scp -r ~/.claude/skills/<コメント追記スキル名> gb10:/opt/Lang_Chain/skills/
+
+# サーバーの既存の .env に1行追記する（.env.example をコピーし直すと設定済みの値が消えるため、上書きしない）
+ssh gb10 "echo 'CLAUDE_COMMENT_SKILL_PATH=/opt/Lang_Chain/skills/<コメント追記スキル名>/SKILL.md' >> /opt/Lang_Chain/.env"
+```
+
+次の実行（夜間の定期実行を含む）から、設計書と一緒にコメント追記が行われる。
 
 - 対象ファイルは設計書と同じ（`<xx>_api/pkg/handler/` 配下、テストコード除く）
 - **Goリポジトリは書き換えない**。コメントを追記したファイルは `--out/_commented/<--repo からの相対パス>` に出力する（例：`out/_commented/user_api/pkg/handler/user.go`）。取り込むかどうかは差分を見て人が判断する
@@ -153,7 +169,7 @@ python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --tasks comment
 | Claude Code のインストール | 不要 |
 | このリポジトリの clone、venv 作成、`pip install` | `/opt` 配下なら要 |
 | `.env` の作成（`CLAUDE_SKILL_PATH`・`CLAUDE_BIN` など） | 不要 |
-| SKILL.md をクライアントから `scp` で配置 | 不要 |
+| SKILL.md（設計書・コメント追記）をクライアントから `scp` で配置 | 不要 |
 | Goリポジトリの clone と、パスワードなしで `git pull` できる設定（SSH鍵など） | 不要 |
 | GB10 のスリープ無効化（「クライアントPCを落としてよいか」参照） | 要 |
 | 定期実行タイマーの設置（使う場合。「定期実行（systemd タイマー）」参照） | 要 |
