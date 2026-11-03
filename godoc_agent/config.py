@@ -16,11 +16,23 @@ def _int_env(name: str, default: int, minimum: int = 1) -> int:
     return value
 
 
+def _ratio_env(name: str, default: float) -> float:
+    raw = os.getenv(name, str(default))
+    try:
+        value = float(raw)
+    except ValueError as e:
+        raise ValueError(f"環境変数 {name} は数値で指定してください: {raw!r}") from e
+    if not 0 < value <= 1:  # NaN もここで弾かれる
+        raise ValueError(f"環境変数 {name} は 0 より大きく 1 以下で指定してください: {raw!r}")
+    return value
+
+
 @dataclass(frozen=True)
 class Settings:
     ollama_base_url: str
     model: str
     num_ctx: int
+    ctx_warn_ratio: float
     num_predict: int
     concurrency: int
     max_attempts: int
@@ -44,6 +56,11 @@ class Settings:
         # 1トークン≒3文字とし、追記するコメントの分として出力上限の半分を残す
         return min(self.max_source_chars, self.num_predict * 3 // 2)
 
+    @property
+    def ctx_warn_tokens(self) -> float:
+        # 1回の実行の入力トークン数がこれを超えたら、切り捨ての可能性として警告する
+        return self.num_ctx * self.ctx_warn_ratio
+
 
 def load_settings() -> Settings:
     base_dir = Path(__file__).resolve().parent.parent
@@ -51,6 +68,7 @@ def load_settings() -> Settings:
         ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
         model=os.getenv("LLM_MODEL", "qwen3-coder-next"),
         num_ctx=_int_env("LLM_NUM_CTX", 65536, minimum=4096),
+        ctx_warn_ratio=_ratio_env("LLM_CTX_WARN_RATIO", 0.9),
         num_predict=_int_env("LLM_NUM_PREDICT", 8192),
         concurrency=_int_env("LLM_CONCURRENCY", 2),
         max_attempts=_int_env("DOC_MAX_ATTEMPTS", 3),

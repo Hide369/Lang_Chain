@@ -74,6 +74,35 @@ async def test_retry_resumes_previous_session_with_feedback_only(fake_claude, tm
     assert "--append-system-prompt" not in argv
 
 
+async def test_input_token_usage_is_recorded(fake_claude, tmp_path):
+    usage = {"input_tokens": 1200, "cache_read_input_tokens": 30000, "cache_creation_input_tokens": 800, "output_tokens": 500}
+    fake_claude.respond(claude_result("# 設計書", usage=usage))
+
+    reply = await make_llm(fake_claude, tmp_path).ainvoke([HumanMessage("作成して")])
+
+    assert reply.response_metadata["input_tokens"] == 1200
+    assert reply.response_metadata["cache_read_input_tokens"] == 30000
+    assert reply.response_metadata["cache_creation_input_tokens"] == 800
+    assert reply.response_metadata["output_tokens"] == 500
+
+
+@pytest.mark.parametrize("usage", [{}, None])
+async def test_missing_usage_is_recorded_as_none(fake_claude, tmp_path, usage):
+    # Ollama が usage を返さない（項目がない・null）場合も、失敗にせず None として残す
+    response = claude_result("# 設計書")
+    if usage is None:
+        response["json"]["usage"] = None
+    else:
+        del response["json"]["usage"]
+    fake_claude.respond(response)
+
+    reply = await make_llm(fake_claude, tmp_path).ainvoke([HumanMessage("作成して")])
+
+    assert reply.content == "# 設計書"
+    for key in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens"):
+        assert reply.response_metadata[key] is None
+
+
 async def test_error_result_raises_with_subtype(fake_claude, tmp_path):
     fake_claude.respond(claude_result("", is_error=True, subtype="error_max_turns") | {"exit": 1})
 

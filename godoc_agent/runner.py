@@ -41,6 +41,8 @@ class FileResult:
     duration_s: float
     attempts: int = 0
     issues: list[str] | None = None
+    # 合否には影響しない注意（コンテキスト上限への接近など）。issues と違い done でも残る
+    warnings: list[str] | None = None
     llm_calls: list[dict] | None = None
     error: str | None = None
     draft: str | None = field(default=None, repr=False)
@@ -128,9 +130,29 @@ async def process_file(
     )
 
 
+def context_warnings(llm_calls: list[dict] | None, settings: Settings) -> list[str]:
+    """入力トークン数が LLM_NUM_CTX の LLM_CTX_WARN_RATIO を超えた実行を警告にする。
+
+    Ollama はコンテキスト超過分を黙って切り捨てるため、検証に合格していても入力の一部が
+    読まれていない可能性がある。合否の判定はグラフに任せ、ここでは注意として残すだけにする。
+    """
+    warnings = []
+    for i, call in enumerate(llm_calls or [], start=1):
+        total = call.get("total_input_tokens")
+        if total is not None and total > settings.ctx_warn_tokens:
+            warnings.append(
+                f"{i} 回目の実行の入力が {total} トークンで、LLM_NUM_CTX={settings.num_ctx} の "
+                f"{settings.ctx_warn_ratio:.0%} を超えています（入力が切り捨てられた可能性があります）"
+            )
+    return warnings
+
+
 def summarize(results: list[FileResult], wall_s: float) -> str:
     calls = [c for r in results for c in (r.llm_calls or [])]
     turns = [c["num_turns"] for c in calls if c.get("num_turns")]
+    # usage を返さない実行（不明）は除いて集計する
+    input_tokens = [c["total_input_tokens"] for c in calls if c.get("total_input_tokens") is not None]
+    warned = [r for r in results if r.warnings]
     done = [r for r in results if r.status == "done"]
     lines = [f"対象: {len(results)} 件 / 経過時間: {wall_s / 60:.1f} 分"]
     for task in dict.fromkeys(r.task for r in results):
@@ -139,6 +161,13 @@ def summarize(results: list[FileResult], wall_s: float) -> str:
     lines.append(
         f"Claude Code 実行: {len(calls)} 回 / 平均 {sum(turns) / len(turns):.1f} ターン" if turns else f"Claude Code 実行: {len(calls)} 回"
     )
+    if input_tokens:
+        lines.append(
+            f"入力トークン(1回あたり): 最大 {max(input_tokens)} / 平均 {sum(input_tokens) / len(input_tokens):.0f}"
+            f"（{len(calls)} 回中 {len(input_tokens)} 回で取得）"
+        )
+    if warned:
+        lines.append(f"コンテキスト上限に近い実行があった件数: {len(warned)} 件（計測ログの warnings を参照）")
     if done:
         lines.append(f"成功1件あたり平均: {sum(r.duration_s for r in done) / len(done):.0f} 秒")
     if results:
@@ -223,6 +252,7 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
         with metrics_path.open("a", encoding="utf-8") as metrics_file:
             for i, finished in enumerate(asyncio.as_completed(jobs), start=1):
                 result = await finished
+                result.warnings = context_warnings(result.llm_calls, settings)
                 if result.status == "done" and result.draft:
                     task_run = runs[result.task]
                     out_path = task_run.task.output_path(out_dir, result.rel_path)
@@ -233,6 +263,8 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
                 metrics_file.write(json.dumps(result.to_log(), ensure_ascii=False) + "\n")
                 metrics_file.flush()
                 detail = f" ({result.error or '; '.join(result.issues or [])})" if result.status != "done" else ""
+                if result.warnings:
+                    detail += f" [警告: {'; '.join(result.warnings)}]"
                 print(
                     f"[{i}/{len(targets)}] {result.status:<17} {result.duration_s:6.0f}s  {result.task:<7} {result.rel_path}{detail}",
                     flush=True,

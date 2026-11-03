@@ -29,7 +29,7 @@ flowchart TD
 
 [runner.py](../godoc_agent/runner.py) の `main()` / `run()`。対象ファイルを走査する前に、設定ミスをまとめて検出する。
 
-1. `.env` を読み込み、環境変数から設定を作る（[config.py](../godoc_agent/config.py)）。整数値の不正はここで `ValueError`
+1. `.env` を読み込み、環境変数から設定を作る（[config.py](../godoc_agent/config.py)）。整数値・割合（`LLM_CTX_WARN_RATIO`）の不正はここで `ValueError`
 2. `--repo` がディレクトリか確認し、`--out`・`--out/_runs`・チェックポイントDBのフォルダを作る
 3. 今日の日付を**1回だけ**取得する（日付をまたいでも同じ実行の出力は同じ日付になる）
 4. 実行するタスクを決める
@@ -117,7 +117,7 @@ stateDiagram-v2
 | ノード | 処理 |
 |---|---|
 | `prepare` | 入力サイズ（ソース + 前回の出力の文字数）を上限と比較。超えたら `too_large`。超えなければ静的解析で事実（package・imports・types・functions）を抽出し、最初のメッセージを組み立てる |
-| `generate` | Claude Code を1回実行し、応答から全体を囲む ```` ``` ```` を外して下書きにする。セッションIDと計測値（ターン数・出力トークン数・所要時間）を残す |
+| `generate` | Claude Code を1回実行し、応答から全体を囲む ```` ``` ```` を外して下書きにする。セッションIDと計測値（ターン数・入出力トークン数・所要時間）を残す |
 | `validate` | タスクごとの検証を行い、`done` / 再生成 / `failed_validation` を決める |
 
 入力サイズの上限（[config.py](../godoc_agent/config.py)）は「1トークン≒3文字」の概算で決める。
@@ -157,6 +157,14 @@ stateDiagram-v2
 - 出力が JSON として読めない
 - 終了コードが0以外、または `is_error`（例：`subtype=error_max_turns`）
 
+成功した場合は、JSON 出力の `usage` から次を応答に残し、`generate` が計測ログの `llm_calls[]` に記録する。`usage` やその項目がない場合（Ollama が返さない場合など）は `null` とし、エラーにはしない。
+
+| 項目 | 内容 |
+|---|---|
+| `output_tokens` | 出力トークン数 |
+| `input_tokens` / `cache_read_input_tokens` / `cache_creation_input_tokens` | 入力トークン数（プロンプトキャッシュ分は `input_tokens` に含まれないため別々に残す） |
+| `total_input_tokens` | 上の入力3項目のうち値のあるものの合計。すべて `null` なら `null`（`doc_graph.py` で計算） |
+
 ### 4-5. プロンプトの構成（`prompts.py`）
 
 [prompts.py](../godoc_agent/prompts.py)。
@@ -182,9 +190,11 @@ stateDiagram-v2
 1. `status = done` なら出力ファイルを書き出す（フォルダ構成は `--repo` からの相対パスと同じ）
 2. 同じく `done` なら manifest にソースのハッシュを記録する（一時ファイル経由で置き換え、破損を防ぐ）
 3. 計測ログ `<out>/_runs/<run_id>.jsonl` に1行追記する（本文は含めない）
-4. `[i/N] <status> <秒>s <タスク> <相対パス> (問題点)` を表示する
+4. `[i/N] <status> <秒>s <タスク> <相対パス> (問題点) [警告: ...]` を表示する（問題点は `done` 以外、警告はあれば `done` でも出る）
 
 `done` 以外では出力ファイルも manifest も更新しない。そのため次回の実行で再び処理対象になる。
+
+計測ログに書く前に、`llm_calls[]` の各実行の `total_input_tokens` が `LLM_NUM_CTX × LLM_CTX_WARN_RATIO`（既定 0.9）を超えていないかを確認し、超えていれば `warnings` に残す（`runner.py` の `context_warnings()`）。Ollama は `OLLAMA_CONTEXT_LENGTH` を超えた分を黙って切り捨てるため、検証に合格していても入力の一部が読まれていない可能性を示すためのもの。合否（`status`）は変えず、`issues`（検証の指摘）とも分けている。
 
 ## 6. サマリーと終了コード
 
@@ -193,6 +203,8 @@ stateDiagram-v2
 - 対象件数・経過時間
 - タスクごとのステータス別件数
 - Claude Code の実行回数・平均ターン数
+- 入力トークン数（1回あたり）の最大値・平均値（値が取れた実行だけで集計。1回も取れなければ表示しない）
+- 入力トークン数の警告が出た件数（あれば）
 - 成功1件あたりの平均処理時間・失敗率
 
 | 終了コード | 意味 |

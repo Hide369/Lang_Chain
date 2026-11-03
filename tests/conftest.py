@@ -41,11 +41,14 @@ def good_doc(*identifiers: str) -> str:
     return f"# 詳細設計書\n\n## 1. 概要\n説明 {body}\n\n## 2. 関数・メソッド仕様\n詳細\n"
 
 
-def reply(content: str, *, session_id: str = "s1") -> AIMessage:
+def reply(content: str, *, session_id: str = "s1", input_tokens: int | None = None) -> AIMessage:
     """ClaudeCodeLLM が返す応答と同じ形。"""
     return AIMessage(
         content=content,
-        response_metadata={"session_id": session_id, "num_turns": 3, "output_tokens": 500},
+        response_metadata={
+            "session_id": session_id, "num_turns": 3, "output_tokens": 500,
+            "input_tokens": input_tokens, "cache_read_input_tokens": None, "cache_creation_input_tokens": None,
+        },
     )
 
 
@@ -66,7 +69,9 @@ class ScriptedLLM:
         return item
 
 
-def claude_result(result: str, *, session_id: str = "s1", is_error: bool = False, subtype: str = "success") -> dict:
+def claude_result(
+    result: str, *, session_id: str = "s1", is_error: bool = False, subtype: str = "success", usage: dict | None = None
+) -> dict:
     """`claude -p --output-format json` の出力を模した応答。"""
     return {"json": {
         "type": "result",
@@ -75,7 +80,7 @@ def claude_result(result: str, *, session_id: str = "s1", is_error: bool = False
         "result": result,
         "session_id": session_id,
         "num_turns": 3,
-        "usage": {"input_tokens": 20000, "output_tokens": 500},
+        "usage": usage if usage is not None else {"input_tokens": 20000, "output_tokens": 500},
     }}
 
 

@@ -126,6 +126,11 @@ class ClaudeCodeLLM:
                 "session_id": data.get("session_id"),
                 "num_turns": data.get("num_turns"),
                 "output_tokens": usage.get("output_tokens"),
+                # コンテキストの大きさを見るための入力側。プロンプトキャッシュ分は input_tokens に含まれない
+                # ため別々に残す。Ollama が返さない項目は None のまま（計測できないだけで失敗にはしない）
+                "input_tokens": usage.get("input_tokens"),
+                "cache_read_input_tokens": usage.get("cache_read_input_tokens"),
+                "cache_creation_input_tokens": usage.get("cache_creation_input_tokens"),
             },
         )
 
