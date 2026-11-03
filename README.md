@@ -79,9 +79,12 @@ scp -r ~/.claude/skills/<コメント追記スキル名> gb10:/opt/Lang_Chain/sk
 #      CLAUDE_SKILL_PATH=/opt/Lang_Chain/skills/<設計書スキル名>/SKILL.md
 #      CLAUDE_COMMENT_SKILL_PATH=/opt/Lang_Chain/skills/<コメント追記スキル名>/SKILL.md
 
-# 5. テスト（Ollama・Claude Code 不要）
-pytest
+# 5. テスト（Ollama・Claude Code 不要）。最後に「N passed」とだけ表示されれば成功
+cd /opt/Lang_Chain && .venv/bin/python -m pytest
+#    クライアントから実行する場合: ssh gb10 "cd /opt/Lang_Chain && .venv/bin/python -m pytest"
 ```
+
+テストは `/opt/Lang_Chain`（`pytest.ini` のある場所）で、仮想環境の Python から実行する。上の形なら、ターミナルを開き直して `activate` していなくても動く。
 
 Ollama の接続先（`ANTHROPIC_BASE_URL` など）は runner が `claude` の起動時に設定するため、シェルに設定する必要はない。
 テレメトリなどモデル以外への通信も `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` で止めている。
