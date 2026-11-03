@@ -104,23 +104,69 @@ Ollama の接続先（`ANTHROPIC_BASE_URL` など）は runner が `claude` の�
 `.env` に `CLAUDE_COMMENT_SKILL_PATH`（コメント追記スキルの SKILL.md）を設定すると、設計書の生成と同じ実行の中で、対象の各Goファイルにコメントを追記する。
 スキルの置き方・扱い（全文をシステムプロンプトに入れる、日付を渡す、ファイル編集をさせない等）は設計書のスキルと同じ。
 
-設置手順（設定済みのサーバーに後から追加する場合）:
+#### 有効にする手順（設計書の生成がすでに動いているサーバーに追加する場合）
+
+すべてクライアントのターミナルから実行する（sudo は不要）。`<コメント追記スキル名>` はクライアントの `~/.claude/skills/` 配下のフォルダ名、`/srv/repos/myapp` は実際の `--repo` のパスに置き換える。
+
+**手順1. サーバーのプログラムを最新にする**
 
 ```bash
-# クライアントから、スキルのフォルダごとサーバーへ送る（設計書スキルと同じ skills/ 配下）
-scp -r ~/.claude/skills/<コメント追記スキル名> gb10:/opt/Lang_Chain/skills/
-
-# サーバーの既存の .env に1行追記する（.env.example をコピーし直すと設定済みの値が消えるため、上書きしない）
-ssh gb10 "echo 'CLAUDE_COMMENT_SKILL_PATH=/opt/Lang_Chain/skills/<コメント追記スキル名>/SKILL.md' >> /opt/Lang_Chain/.env"
+ssh gb10 "cd /opt/Lang_Chain && git pull && .venv/bin/pip install -r requirements.txt"
 ```
 
-次の実行（夜間の定期実行を含む）から、設計書と一緒にコメント追記が行われる。
+**手順2. スキルをサーバーに送る**（参照ファイルも含めてフォルダごと。設計書スキルと同じ `skills/` 配下に置く）
+
+```bash
+scp -r ~/.claude/skills/<コメント追記スキル名> gb10:/opt/Lang_Chain/skills/
+ssh gb10 "ls /opt/Lang_Chain/skills/<コメント追記スキル名>/SKILL.md"   # パスが表示されればよい
+```
+
+**手順3. `.env` にスキルのパスを1行追記する**
+
+既存の `.env` に追記する。`.env.example` をコピーし直すと、設定済みの値（`CLAUDE_BIN` など）が消えるので上書きしないこと。
+
+```bash
+ssh gb10 "cd /opt/Lang_Chain && grep -q '^CLAUDE_COMMENT_SKILL_PATH=' .env || echo 'CLAUDE_COMMENT_SKILL_PATH=/opt/Lang_Chain/skills/<コメント追記スキル名>/SKILL.md' >> .env"
+ssh gb10 "grep '^CLAUDE_COMMENT_SKILL_PATH=' /opt/Lang_Chain/.env"   # 追記した行が表示されればよい
+```
+
+**手順4. 3ファイルだけで試す**（コメント追記だけを実行する）
+
+```bash
+ssh gb10 "cd /opt/Lang_Chain && .venv/bin/python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --tasks comment --limit 3 --run-id trial-comment"
+```
+
+- 最初に `run_id=trial-comment タスク=comment 対象=3 件` と表示され、1ファイル終わるごとに `[1/3] done ... comment user_api/pkg/handler/xxx.go` のような行が出る
+- 1ファイル数分〜十数分かかる。Claude Code から依頼する場合は Bash ツールの時間上限（10分）で打ち切られるため、[2. SSHが切れても止まらないように起動する](#2-sshが切れても止まらないように起動する)の tmux の形で起動する
+- 途中で止まったら、同じコマンドをもう一度実行すれば続きから再開する
+
+**手順5. 結果を確認する**
+
+```bash
+# コメント追記済みのファイルの一覧
+ssh gb10 "cd /opt/Lang_Chain/out/_commented && find . -name '*.go'"
+# 元のファイルとの差分（追記されたコメントだけが表示される）
+ssh gb10 "diff -ru /srv/repos/myapp/user_api/pkg/handler /opt/Lang_Chain/out/_commented/user_api/pkg/handler"
+```
+
+手順4の表示で `done` 以外になったファイルは、次のように対処する（詳細は `out/_runs/trial-comment.jsonl` の `issues` / `error` 欄）。
+
+| 表示 | 意味 | 対処 |
+|---|---|---|
+| `too_large` | ファイルが大きく、全文を1回の応答で返せない | `.env` の `LLM_NUM_PREDICT` を上げる（例：`16384`）。上限の目安は `LLM_NUM_PREDICT × 1.5` 文字 |
+| `failed_validation` | 再生成しても、コメント以外のコードを変えてしまった | 同じコマンドで再実行する（失敗したファイルだけが処理される）。繰り返す場合はスキルにコードを変更しないよう明記する |
+| `error` | Claude Code の異常終了など（例：`error_max_turns`） | `error` 欄を確認する。ターン数不足なら `.env` の `CLAUDE_MAX_TURNS` を上げる |
+
+**手順6. 完了**
+
+以降は、手動実行・夜間の定期実行のどちらでも、設計書と一緒にコメント追記が行われる（`--tasks` の指定は不要）。
+試した3ファイルは記録済みのため、次回の実行ではソースが変わらない限りスキップされる。
+コメント追記を止めるには、`.env` の `CLAUDE_COMMENT_SKILL_PATH` の行を削除する。
+
+#### 動作の詳細
 
 - 対象ファイルは設計書と同じ（`<xx>_api/pkg/handler/` 配下、テストコード除く）
-- **Goリポジトリは書き換えない**。コメントを追記したファイルは `--out/_commented/<--repo からの相対パス>` に出力する（例：`out/_commented/user_api/pkg/handler/user.go`）。取り込むかどうかは差分を見て人が判断する
-  ```bash
-  diff -ru /srv/repos/myapp/user_api/pkg/handler out/_commented/user_api/pkg/handler   # 追記内容の確認
-  ```
+- **Goリポジトリは書き換えない**。コメントを追記したファイルは `--out/_commented/<--repo からの相対パス>` に出力する（例：`out/_commented/user_api/pkg/handler/user.go`）。取り込むかどうかは差分を見て人が判断する（手順5）
 - エージェントにはファイルの全文を返させ、**コメントと空白以外のコードが1文字でも変わっていたら不合格**として、差分の行番号を添えて再生成させる（`DOC_MAX_ATTEMPTS` 回まで）。文字列リテラルの中身・改行による文の区切りも比較する
 - コメントの書き方・量はスキルに任せ、プログラムでは検証しない
 - 出力がファイル全文になるため、1回の応答の出力上限（`LLM_NUM_PREDICT`）に収まらないファイルは事前に `too_large` とする（上限 = `LLM_NUM_PREDICT × 1.5` 文字。既定 8192 なら約 12,000 文字）。大きなファイルを扱うには `LLM_NUM_PREDICT` を上げる
