@@ -7,14 +7,16 @@ GB10サーバー上で動かし、クライアントのClaude CodeからSSH経�
 モデルは Ollama の Anthropic 互換API経由で qwen3-coder-next を使うため、ソースコードはサーバーの外に出ない。
 LangGraph は、その外側で並列制御・差分スキップ・再開・検証・計測を受け持つ。
 
+同じ仕組みで、**Goファイルにコメントを追記するスキル**も一括で実行できる（`CLAUDE_COMMENT_SKILL_PATH` を設定した場合。[コメント追記](#コメント追記)を参照）。
+
 runner は常駐サービスではなく、起動すると対象ファイルを処理して終了する**バッチ**である（常駐するのは Ollama だけ）。
 必要なときに起動するか、[定期実行（systemd タイマー）](#定期実行systemd-タイマー) で毎晩自動実行する。
 
 ## 設計方針（方式A：1ファイル = 1セッション）
 
-- Goファイル1本ごとに独立した `thread_id` でグラフを実行する。前のファイルのコンテキストは一切持ち込まない
-- `thread_id = <run_id>:<パスのハッシュ>`。同じ `--run-id` で再実行すると、失敗・中断したファイルだけがチェックポイントから再開される
-- ソースのハッシュを `out/.manifest.json` に記録し、変更のないファイルは次回以降スキップする
+- Goファイル1本×タスク（設計書 `doc` / コメント追記 `comment`）ごとに独立した `thread_id` でグラフを実行する。前のファイルのコンテキストは一切持ち込まない
+- `thread_id = <run_id>:<タスク>:<パスのハッシュ>`。同じ `--run-id` で再実行すると、失敗・中断したものだけがチェックポイントから再開される
+- ソースのハッシュをタスクごとに記録し（設計書は `out/.manifest.json`、コメント追記は `out/_commented/.manifest.json`）、変更のないファイルは次回以降スキップする
 - 設計書の構成・書き方は SKILL.md に任せる。検証するのは、本文が空でないことと、公開識別子（静的解析で抽出）がすべて記載されていることだけ
 - 設計書の対象は **`<xx>_api/pkg/handler/` 配下（サブディレクトリを含む）のGoファイルだけ**（`xx` は任意）
   - `--repo` には、複数の `xx_api` を含む親ディレクトリと、`xx_api` 自体のどちらを指定してもよい（複数の API を扱うなら親ディレクトリを推奨。「3. 設計書を取得する」の注意を参照）
@@ -38,11 +40,12 @@ generate の中身（ファイルごと）:
 
 | ファイル | 役割 |
 |---|---|
-| [godoc_agent/doc_graph.py](godoc_agent/doc_graph.py) | 1ファイル分のグラフ（生成・検証・再試行） |
+| [godoc_agent/doc_graph.py](godoc_agent/doc_graph.py) | 1ファイル×1タスク分のグラフ（生成・検証・再試行） |
+| [godoc_agent/tasks.py](godoc_agent/tasks.py) | タスク（設計書・コメント追記）ごとのプロンプト・検証・出力先の定義 |
 | [godoc_agent/runner.py](godoc_agent/runner.py) | バッチ実行、並列数制御、差分スキップ、再開、計測ログ |
 | [godoc_agent/claude_code.py](godoc_agent/claude_code.py) | `claude -p` の起動、Ollama への接続設定、セッションの継続（`--resume`） |
 | [godoc_agent/prompts.py](godoc_agent/prompts.py) | SKILL.md の読み込みと、エージェントへの指示の組み立て |
-| [godoc_agent/go_source.py](godoc_agent/go_source.py) | 対象Goファイルの列挙、関数・型などの事実抽出（簡易版） |
+| [godoc_agent/go_source.py](godoc_agent/go_source.py) | 対象Goファイルの列挙、関数・型などの事実抽出（簡易版）、コメント以外の差分検出 |
 | [godoc_agent/preflight.py](godoc_agent/preflight.py) | 開始前の Ollama 接続・モデル存在チェック |
 
 ## サーバー(GB10)へのセットアップ
@@ -92,6 +95,21 @@ Ollama の接続先（`ANTHROPIC_BASE_URL` など）は runner が `claude` の�
   - 前回の設計書もプロンプトに入るため、`too_large` の判定はソースと前回の設計書の合計文字数で行う
   - `--out` の設計書を消すと履歴も失われ、次回は初版から作り直しになる。ソースが変わっていなくても `--force` で再生成すると版が1つ上がる
 
+### コメント追記
+
+`.env` に `CLAUDE_COMMENT_SKILL_PATH`（コメント追記スキルの SKILL.md）を設定すると、設計書の生成と同じ実行の中で、対象の各Goファイルにコメントを追記する。
+スキルの置き方・扱い（全文をシステムプロンプトに入れる、日付を渡す、ファイル編集をさせない等）は設計書のスキルと同じ。
+
+- 対象ファイルは設計書と同じ（`<xx>_api/pkg/handler/` 配下、テストコード除く）
+- **Goリポジトリは書き換えない**。コメントを追記したファイルは `--out/_commented/<--repo からの相対パス>` に出力する（例：`out/_commented/user_api/pkg/handler/user.go`）。取り込むかどうかは差分を見て人が判断する
+  ```bash
+  diff -ru /srv/repos/myapp/user_api/pkg/handler out/_commented/user_api/pkg/handler   # 追記内容の確認
+  ```
+- エージェントにはファイルの全文を返させ、**コメントと空白以外のコードが1文字でも変わっていたら不合格**として、差分の行番号を添えて再生成させる（`DOC_MAX_ATTEMPTS` 回まで）。文字列リテラルの中身・改行による文の区切りも比較する
+- コメントの書き方・量はスキルに任せ、プログラムでは検証しない
+- 出力がファイル全文になるため、1回の応答の出力上限（`LLM_NUM_PREDICT`）に収まらないファイルは事前に `too_large` とする（上限 = `LLM_NUM_PREDICT × 1.5` 文字。既定 8192 なら約 12,000 文字）。大きなファイルを扱うには `LLM_NUM_PREDICT` を上げる
+- 前回の出力は引き継がない。Goリポジトリのソースが変わったファイルは、その時点のソースから追記し直す（取り込んだ後はソースが変わるため、新たに不足している箇所だけ追記される想定）
+
 ## 使い方
 
 ```bash
@@ -103,7 +121,13 @@ python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --run-id nightl
 
 # 途中で止まった・失敗があった場合は同じ run-id で再実行
 python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --run-id nightly-20261102
+
+# タスクを選んで実行（省略時は doc と、CLAUDE_COMMENT_SKILL_PATH があれば comment も）
+python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --tasks comment
 ```
+
+- `--limit` はファイル×タスクの件数で数える（両方のタスクを実行する場合、`--limit 5` は約2.5ファイル分）
+- 並列数（`LLM_CONCURRENCY`）はタスクをまたいだ合計。両方のタスクを実行すると Claude Code の実行回数はおよそ2倍になる
 
 終了コード: `0` 全件成功 / `1` 一部失敗（詳細は計測ログ） / `2` 設定・接続エラーで開始できず
 
@@ -226,6 +250,7 @@ PCを再起動した後は、ログの末尾にサマリー（`対象: ... 件 /
 /srv/repos/myapp/order_api/pkg/handler/order.go  → /opt/Lang_Chain/out/order_api/pkg/handler/order.go.md
 /opt/Lang_Chain/out/.manifest.json                 … 生成済みファイルの記録（差分スキップ用）
 /opt/Lang_Chain/out/_runs/<run-id>.jsonl           … 計測ログ
+/opt/Lang_Chain/out/_commented/user_api/pkg/handler/user.go … コメント追記済みのGoファイル（コメント追記を有効にした場合）
 ```
 
 > **注意：`--repo` に `xx_api` 自体を指定する場合**
@@ -305,6 +330,7 @@ sudo systemctl disable --now godoc-nightly.timer    # 定期実行を止める
 
 `out/_runs/<run_id>.jsonl` に1ファイル1行で記録され、終了時にサマリーが表示される。
 
+- `task`：`doc`（設計書）/ `comment`（コメント追記）
 - `duration_s`：1ファイルの処理時間（並列待ちを除く）
 - `attempts`：生成回数（検証NGで再生成した場合に増える）
 - `llm_calls[].num_turns` / `output_tokens` / `elapsed_s`：Claude Code 1回の実行ごとのターン数・出力トークン数・所要時間
@@ -316,6 +342,8 @@ sudo systemctl disable --now godoc-nightly.timer    # 定期実行を止める
 - **入力の切り捨てを検出できない**。Claude Code はコンテキストの大きさを知らないまま会話を伸ばし、Ollama は `OLLAMA_CONTEXT_LENGTH` を超えた分を黙って切り捨てる。大きすぎるファイルは「1トークン≒3文字」の概算で事前に `too_large` とし、ターン数は `CLAUDE_MAX_TURNS` で抑えている
 - 安定性は、ローカルモデルが Claude Code のツールを正しく使えるかに左右される。同じ操作の繰り返しや途中終了は `error`（`error_max_turns` など）として記録される
 - 設計書の構成（見出し）は検証しない。SKILL.md どおりの構成になっているかは、PoCで出力を確認する
+- コメント追記の検証は、Pythonで書いた簡易な字句解析でコメントと空白を除いて比較している。コードの同一性は保証するが、出力が `gofmt` 済みかどうか・コンパイルできるかは確認しない（取り込む前に `gofmt -l` / `go build` で確認する）
+- この版から `thread_id` にタスク名が入ったため、更新前の版で中断した実行は同じ `--run-id` でも再開されず、最初から処理される（差分スキップの記録 `.manifest.json` はそのまま使える）
 - 履歴の引き継ぎ（前回までの行が残っているか、版が上がっているか）は検証しない。ローカルモデルが履歴を書き換えたり落としたりしないかは、PoCで2回目以降の出力を確認する
 - パッケージ単位の集約、人による承認（interrupt）は未実装（次のフェーズ）
 - LangSmithのトレースはスキル・プロンプト・生成された設計書を外部に送信するため、既定では無効

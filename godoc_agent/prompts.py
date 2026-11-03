@@ -1,4 +1,4 @@
-"""スキル(SKILL.md)の読み込みとプロンプト組み立て。"""
+"""スキル(SKILL.md)の読み込みとプロンプト組み立て（設計書・コメント追記）。"""
 
 from datetime import date
 from pathlib import Path
@@ -23,9 +23,9 @@ AGENT_SYSTEM_PROMPT = """あなたはGoの詳細設計書を一括生成する�
 """
 
 
-def load_skill(path: Path | None) -> str:
+def load_skill(path: Path | None, env_name: str = "CLAUDE_SKILL_PATH") -> str:
     if path is None:
-        raise ValueError("環境変数 CLAUDE_SKILL_PATH に SKILL.md のパスを指定してください")
+        raise ValueError(f"環境変数 {env_name} に SKILL.md のパスを指定してください")
     if not path.is_file():
         raise FileNotFoundError(f"SKILL.md が見つかりません: {path}")
     return path.read_text(encoding="utf-8")
@@ -60,8 +60,51 @@ def build_agent_messages(
     return [SystemMessage(content=system), HumanMessage(content=human)]
 
 
-def build_feedback(issues: list[str]) -> HumanMessage:
+def build_doc_feedback(issues: list[str]) -> HumanMessage:
     bullet = "\n".join(f"- {i}" for i in issues)
     return HumanMessage(
         content=f"直前の設計書には次の問題があります。修正した設計書の全文を出力し直してください。\n{bullet}"
+    )
+
+
+COMMENT_SYSTEM_PROMPT = """あなたはGoファイルへのコメント追記を一括で行うバッチ処理の一部として、非対話で動作しています。
+<skill> に書かれたコメント追記スキルの手順と記述ルールに従ってください。
+
+バッチ処理のため、次のルールをスキルの記述より優先します:
+- ファイルの作成・編集やコマンドの実行はしない。スキルにファイルを編集する手順があっても、書き出しはバッチ側が行う
+- コメントを追記したGoファイルの全文だけを最終応答として出力する。前置き・説明・```での囲みは付けない
+- コメント以外のコードは変更しない。識別子・式・文字列・import・宣言の順序などはそのまま残し、変えてよいのはコメントと空白だけとする
+  （コメント以外の差分はバッチ側で機械的に検出され、やり直しになる）
+- ユーザーへの質問はしない（回答は得られない）
+- スキルが参照している別ファイルは {skill_dir} から Read で読める
+- 今日の日付は {today} とする。スキルで今日の日付を記述する箇所にはこの日付を使い、書式はスキルの指定に従う
+
+<skill>
+{skill}
+</skill>
+"""
+
+
+def build_comment_messages(
+    skill: str, skill_dir: Path, today: date, rel_path: str, source: str, facts: GoFacts
+) -> list:
+    # 出力はファイルの全文なので、読み違いが起きないよう現在の内容をそのまま渡す
+    human = f"""次のGoファイルにコメントを追記してください: {rel_path}
+（作業ディレクトリがGoリポジトリのルートです。関連ファイルは Read / Grep / Glob で参照してください）
+
+## 抽出済みの事実（静的解析の結果）
+{facts.to_prompt()}
+
+## 現在のファイルの内容
+<source>
+{source}
+</source>"""
+    system = COMMENT_SYSTEM_PROMPT.format(skill_dir=skill_dir, today=today.isoformat(), skill=skill)
+    return [SystemMessage(content=system), HumanMessage(content=human)]
+
+
+def build_comment_feedback(issues: list[str]) -> HumanMessage:
+    bullet = "\n".join(f"- {i}" for i in issues)
+    return HumanMessage(
+        content=f"直前の出力には次の問題があります。修正したGoファイルの全文を出力し直してください。\n{bullet}"
     )

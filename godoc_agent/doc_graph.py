@@ -1,7 +1,8 @@
-"""Goファイル1本分の設計書を生成するグラフ。
+"""Goファイル1本分の出力（設計書・コメント追記済みソース）を生成するグラフ。
 
-1回の実行 = 1ファイル = 1 thread_id。状態にはそのファイルの情報しか入らないため、
+1回の実行 = 1ファイル×1タスク = 1 thread_id。状態にはそのファイルの情報しか入らないため、
 前のファイルのコンテキストが混ざることはない（方式A）。
+何を生成し、どう検証するかはタスク（tasks.Task）が決める。
 
 prepare -> generate -> validate -+-> (done)
                 ^                |
@@ -10,19 +11,16 @@ prepare -> generate -> validate -+-> (done)
 
 import re
 import time
-from collections.abc import Callable
 from typing import Literal, Protocol, TypedDict
 
 from langchain_core.messages import AIMessage, AnyMessage
 from langgraph.graph import END, START, StateGraph
 
-from .go_source import GoFacts, extract_facts
-from .prompts import build_feedback
+from .go_source import extract_facts
+from .tasks import Task
 
-_FENCE_RE = re.compile(r"^```(?:markdown|md)?\s*\n(.*)\n```\s*$", re.DOTALL)
-
-# (rel_path, facts, previous_doc) -> 最初に送るメッセージ
-InitialMessages = Callable[[str, GoFacts, str | None], list[AnyMessage]]
+# ```markdown / ```go などで全体が囲まれていたら外す
+_FENCE_RE = re.compile(r"^```[\w-]*\s*\n(.*)\n```\s*$", re.DOTALL)
 
 Status = Literal["pending", "done", "too_large", "failed_validation"]
 
@@ -34,7 +32,7 @@ class ChatModel(Protocol):
 class DocState(TypedDict, total=False):
     rel_path: str
     source: str
-    previous_doc: str | None  # 前回生成した設計書。履歴を引き継いで改訂するために渡す
+    previous_output: str | None  # 前回の出力（設計書）。履歴を引き継いで改訂するために渡す
     exported: list[str]
     messages: list[AnyMessage]
     draft: str
@@ -58,35 +56,18 @@ def _call_metrics(response: AIMessage, elapsed_s: float) -> dict:
     }
 
 
-def find_issues(draft: str, exported: list[str]) -> list[str]:
-    # 設計書の構成は SKILL.md に任せ、ここでは静的解析で確実に分かる記載漏れだけを見る
-    if not draft.strip():
-        return ["設計書の本文が空です"]
-    # 単語境界で判定し、"Get" が "GetUser" の中で一致してしまうのを防ぐ
-    unmentioned = [n for n in exported if not re.search(rf"\b{re.escape(n)}\b", draft)]
-    if unmentioned:
-        return [f"次の公開識別子が設計書に記載されていません: {', '.join(unmentioned)}"]
-    return []
-
-
-def build_doc_graph(
-    llm: ChatModel,
-    initial_messages: InitialMessages,
-    *,
-    max_source_chars: int,
-    max_attempts: int,
-) -> StateGraph:
+def build_doc_graph(llm: ChatModel, task: Task, *, max_attempts: int) -> StateGraph:
     def prepare(state: DocState) -> DocState:
         source = state["source"]
-        previous_doc = state.get("previous_doc")
-        # 前回の設計書もプロンプトに入るため、ソースと合わせて上限を判定する
-        total = len(source) + len(previous_doc or "")
-        if total > max_source_chars:
-            return {"status": "too_large", "issues": [f"ソースと前回の設計書が計 {total} 文字で上限 {max_source_chars} を超えています"]}
+        previous_output = state.get("previous_output")
+        # 前回の出力もプロンプトに入るため、ソースと合わせて上限を判定する
+        total = len(source) + len(previous_output or "")
+        if total > task.max_input_chars:
+            return {"status": "too_large", "issues": [f"ソースと前回の出力が計 {total} 文字で上限 {task.max_input_chars} を超えています"]}
         facts = extract_facts(source)
         return {
             "exported": facts.exported,
-            "messages": initial_messages(state["rel_path"], facts, previous_doc),
+            "messages": task.initial_messages(state["rel_path"], source, facts, previous_output),
             "attempts": 0,
             "llm_calls": [],
             "status": "pending",
@@ -107,14 +88,14 @@ def build_doc_graph(
         }
 
     def validate(state: DocState) -> DocState:
-        issues = find_issues(state["draft"], state["exported"])
+        issues = task.find_issues(state["draft"], state["source"], state["exported"])
         if not issues:
             return {"status": "done", "issues": []}
         if state["attempts"] >= max_attempts:
             return {"status": "failed_validation", "issues": issues}
         return {
             "issues": issues,
-            "messages": state["messages"] + [build_feedback(issues)],
+            "messages": state["messages"] + [task.build_feedback(issues)],
         }
 
     def generate_or_end(state: DocState) -> str:

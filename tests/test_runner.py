@@ -38,6 +38,7 @@ def skill_file(tmp_path: Path) -> Path:
 @pytest.fixture
 def env(monkeypatch, tmp_path: Path, skill_file: Path):
     monkeypatch.setenv("CLAUDE_SKILL_PATH", str(skill_file))
+    monkeypatch.delenv("CLAUDE_COMMENT_SKILL_PATH", raising=False)
     monkeypatch.setenv("CHECKPOINT_DB", str(tmp_path / "state" / "cp.sqlite"))
     monkeypatch.setenv("LLM_CONCURRENCY", "1")  # 応答の順序を決定的にする
 
@@ -146,7 +147,96 @@ async def test_requires_skill_path(env, monkeypatch, repo, tmp_path):
         await run_batch(repo, tmp_path / "out")
 
 
-def test_thread_id_is_stable_per_run_and_path():
-    assert runner.thread_id_for("r1", "a.go") == runner.thread_id_for("r1", "a.go")
-    assert runner.thread_id_for("r1", "a.go") != runner.thread_id_for("r1", "b.go")
-    assert runner.thread_id_for("r1", "a.go") != runner.thread_id_for("r2", "a.go")
+def test_thread_id_is_stable_per_run_task_and_path():
+    assert runner.thread_id_for("r1", "doc", "a.go") == runner.thread_id_for("r1", "doc", "a.go")
+    assert runner.thread_id_for("r1", "doc", "a.go") != runner.thread_id_for("r1", "doc", "b.go")
+    assert runner.thread_id_for("r1", "doc", "a.go") != runner.thread_id_for("r2", "doc", "a.go")
+    assert runner.thread_id_for("r1", "doc", "a.go") != runner.thread_id_for("r1", "comment", "a.go")
+
+
+@pytest.fixture
+def comment_skill(monkeypatch, tmp_path: Path) -> Path:
+    path = tmp_path / "skills" / "go-comment" / "SKILL.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("# コメント追記スキル\n手順...\n", encoding="utf-8")
+    monkeypatch.setenv("CLAUDE_COMMENT_SKILL_PATH", str(path))
+    return path
+
+
+def with_comment(repo: Path, rel_path: str) -> str:
+    """コメント追記スキルの出力を模す（コードは変えずに先頭へコメントを足す）。"""
+    return "// Package handler はAPIのハンドラー。\n" + (repo / rel_path).read_text(encoding="utf-8")
+
+
+async def test_runs_doc_and_comment_tasks_in_one_batch(env, comment_skill, monkeypatch, repo, tmp_path):
+    out = tmp_path / "out"
+    # 1ファイルごとに 設計書 → コメント追記 の順で処理される（LLM_CONCURRENCY=1）
+    llm = ScriptedLLM([
+        reply(good_doc("Health")), reply(with_comment(repo, HEALTH)),
+        reply(good_doc("GetUser")), reply(with_comment(repo, USER)),
+    ])
+    use_llm(monkeypatch, llm)
+
+    assert await run_batch(repo, out) == 0
+
+    assert (out / f"{USER}.md").read_text(encoding="utf-8").startswith("# 詳細設計書")
+    # コメント追記済みのGoファイルは _commented 配下に出力し、元のリポジトリは書き換えない
+    assert (out / "_commented" / USER).read_text(encoding="utf-8") == with_comment(repo, USER)
+    assert not (repo / USER).read_text(encoding="utf-8").startswith("//")
+    assert set(json.loads((out / "_commented" / ".manifest.json").read_text(encoding="utf-8"))) == {HEALTH, USER}
+    assert "# コメント追記スキル" in llm.calls[1][0].content
+
+    # 2回目は両タスクとも変更がないのでスキップされる
+    use_llm(monkeypatch, ScriptedLLM([]))
+    assert await run_batch(repo, out, "--run-id", "r2") == 0
+
+
+async def test_comment_that_changes_code_is_not_written(env, comment_skill, monkeypatch, repo, tmp_path):
+    monkeypatch.setenv("DOC_MAX_ATTEMPTS", "1")
+    out = tmp_path / "out"
+    broken = with_comment(repo, HEALTH).replace("func Health()", "func Healthz()")
+    use_llm(monkeypatch, ScriptedLLM([
+        reply(good_doc("Health")), reply(broken),
+        reply(good_doc("GetUser")), reply(with_comment(repo, USER)),
+    ]))
+
+    assert await run_batch(repo, out) == 1
+
+    assert not (out / "_commented" / HEALTH).exists()
+    assert (out / f"{HEALTH}.md").is_file()  # 同じファイルの設計書は影響を受けない
+    logs = [json.loads(line) for line in (out / "_runs" / "r1.jsonl").read_text(encoding="utf-8").splitlines()]
+    failed = [log for log in logs if log["status"] != "done"]
+    assert [(log["task"], log["rel_path"], log["status"]) for log in failed] == [("comment", HEALTH, "failed_validation")]
+
+
+async def test_tasks_option_runs_only_selected_task(env, comment_skill, monkeypatch, repo, tmp_path):
+    # 設計書スキルが未設定でも、コメント追記だけなら実行できる
+    monkeypatch.delenv("CLAUDE_SKILL_PATH")
+    out = tmp_path / "out"
+    use_llm(monkeypatch, ScriptedLLM([reply(with_comment(repo, HEALTH)), reply(with_comment(repo, USER))]))
+
+    assert await run_batch(repo, out, "--tasks", "comment") == 0
+
+    assert (out / "_commented" / HEALTH).is_file()
+    assert not (out / f"{HEALTH}.md").exists()
+
+
+async def test_comment_task_requires_its_skill_path(env, repo, tmp_path):
+    with pytest.raises(ValueError, match="CLAUDE_COMMENT_SKILL_PATH"):
+        await run_batch(repo, tmp_path / "out", "--tasks", "doc,comment")
+
+
+async def test_comment_task_rejects_file_exceeding_output_limit(env, comment_skill, monkeypatch, repo, tmp_path):
+    # ファイル全文を出力するため、LLM_NUM_PREDICT から決まる上限を超えるファイルはLLMを呼ばずに弾く
+    monkeypatch.setenv("LLM_NUM_PREDICT", "10")
+    use_llm(monkeypatch, ScriptedLLM([]))
+
+    assert await run_batch(repo, tmp_path / "out", "--tasks", "comment") == 1
+
+    logs = (tmp_path / "out" / "_runs" / "r1.jsonl").read_text(encoding="utf-8").splitlines()
+    assert {json.loads(line)["status"] for line in logs} == {"too_large"}
+
+
+def test_unknown_task_name_is_rejected():
+    with pytest.raises(SystemExit):
+        runner.parse_args(["--repo", ".", "--out", "out", "--tasks", "doc,lint"])
