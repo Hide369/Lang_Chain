@@ -72,7 +72,7 @@ which claude         # tmux / nohup から起動する場合は、このフル�
 cd /opt/Lang_Chain
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env  # CLAUDE_SKILL_PATH・LLM_MODEL などを編集
+cp .env.example .env  # CLAUDE_SKILL_PATH・LLM_MODEL などを編集（LLM_NUM_CTX は 1. の OLLAMA_CONTEXT_LENGTH と同じ値にする）
 
 # 4. 既存のスキルをサーバーに置く（クライアントから実行。参照ファイルがあればフォルダごと）
 scp -r ~/.claude/skills/<設計書スキル名> gb10:/opt/Lang_Chain/skills/
@@ -401,12 +401,24 @@ sudo systemctl disable --now godoc-nightly.timer    # 定期実行を止める
 - `duration_s`：1ファイルの処理時間（並列待ちを除く）
 - `attempts`：生成回数（検証NGで再生成した場合に増える）
 - `llm_calls[].num_turns` / `output_tokens` / `elapsed_s`：Claude Code 1回の実行ごとのターン数・出力トークン数・所要時間
+- `llm_calls[].input_tokens` / `cache_read_input_tokens` / `cache_creation_input_tokens`：Claude Code 1回の実行ごとの入力トークン数（`usage` の値そのまま）。返らない項目は `null`
+- `llm_calls[].total_input_tokens`：上の3つのうち値のあるものの合計（プロンプトキャッシュ分は `input_tokens` に含まれないため）。すべて `null` なら `null`
+- `warnings`：合否に影響しない注意。`total_input_tokens` が `LLM_NUM_CTX × LLM_CTX_WARN_RATIO`（既定 0.9）を超えた実行があると残る。`done` でも残り、進行表示にも `[警告: ...]` として出る
 - `status`：`done` / `failed_validation` / `too_large` / `error`（`error` の詳細は `error` 欄。例：`error_max_turns`）
+
+サマリーには、入力トークン数（1回あたり）の最大値・平均値と、警告が出た件数も表示される（値が取れた実行だけで集計し、1回も取れなければ表示しない）。
+
+入力トークン数の警告は、Ollama が `OLLAMA_CONTEXT_LENGTH` を超えた分を黙って切り捨てる問題を後から見つけるためのもの。`LLM_NUM_CTX` は Ollama の `OLLAMA_CONTEXT_LENGTH` と**同じ値にする**（ずれると判定もずれる）。
+
+確認事項（PoCで確認する）：
+
+- Ollama の Anthropic 互換APIが `usage.input_tokens` などを実際に返すか（返さなければ `null` になり、警告も出ない）
+- Claude Code の `usage` が「最後の1ターンの値」か「その実行の全ターンの合計」か。合計の場合は実際のコンテキストより大きく出るため、`num_turns` と合わせて見る
 
 ## 既知の制約（技術的負債）
 
 - **事実抽出は正規表現による簡易版**。複雑な宣言を取りこぼす可能性がある。本番では `go/ast` を使う補助ツールに置き換える
-- **入力の切り捨てを検出できない**。Claude Code はコンテキストの大きさを知らないまま会話を伸ばし、Ollama は `OLLAMA_CONTEXT_LENGTH` を超えた分を黙って切り捨てる。大きすぎるファイルは「1トークン≒3文字」の概算で事前に `too_large` とし、ターン数は `CLAUDE_MAX_TURNS` で抑えている
+- **入力の切り捨てを検出できない**。Claude Code はコンテキストの大きさを知らないまま会話を伸ばし、Ollama は `OLLAMA_CONTEXT_LENGTH` を超えた分を黙って切り捨てる。大きすぎるファイルは「1トークン≒3文字」の概算で事前に `too_large` とし、ターン数は `CLAUDE_MAX_TURNS` で抑えている。実行後は入力トークン数が上限に近ければ `warnings` に残すが、切り捨てそのものを検出するわけではなく、`usage` が返らなければ警告も出ない
 - 安定性は、ローカルモデルが Claude Code のツールを正しく使えるかに左右される。同じ操作の繰り返しや途中終了は `error`（`error_max_turns` など）として記録される
 - 設計書の構成（見出し）は検証しない。SKILL.md どおりの構成になっているかは、PoCで出力を確認する
 - コメント追記の検証は、Pythonで書いた簡易な字句解析でコメントと空白を除いて比較している。コードの同一性は保証するが、出力が `gofmt` 済みかどうか・コンパイルできるかは確認しない（取り込む前に `gofmt -l` / `go build` で確認する）
