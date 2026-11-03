@@ -1,26 +1,34 @@
+from dataclasses import replace
+from datetime import date
+from pathlib import Path
+
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
 from conftest import SAMPLE_GO, ScriptedLLM, good_doc, reply
-from godoc_agent.doc_graph import build_doc_graph, find_issues
+from godoc_agent.doc_graph import build_doc_graph
+from godoc_agent.tasks import comment_task, design_doc_task, find_comment_issues, find_doc_issues
 
 ALL_EXPORTED = ("GetUser", "NewService", "Repository", "User")
 
 
-def initial_messages(rel_path, facts, previous_doc):
-    revision = f" 前回: {previous_doc}" if previous_doc else ""
+def initial_messages(rel_path, source, facts, previous_output):
+    revision = f" 前回: {previous_output}" if previous_output else ""
     return [HumanMessage(f"{rel_path} の設計書を作成: {', '.join(facts.exported)}{revision}")]
 
 
-def compile_graph(llm, *, max_attempts=3, max_source_chars=100_000):
-    graph = build_doc_graph(llm, initial_messages, max_source_chars=max_source_chars, max_attempts=max_attempts)
-    return graph.compile(checkpointer=InMemorySaver())
+def compile_graph(llm, *, max_attempts=3, max_source_chars=100_000, task=None):
+    task = task or replace(
+        design_doc_task("スキル", Path("skills"), date(2026, 11, 3), max_input_chars=max_source_chars),
+        initial_messages=initial_messages,
+    )
+    return build_doc_graph(llm, task, max_attempts=max_attempts).compile(checkpointer=InMemorySaver())
 
 
 async def run(graph, thread_id="t1", source=SAMPLE_GO, previous_doc=None):
     config = {"configurable": {"thread_id": thread_id}}
-    return await graph.ainvoke({"rel_path": "user/service.go", "source": source, "previous_doc": previous_doc}, config)
+    return await graph.ainvoke({"rel_path": "user/service.go", "source": source, "previous_output": previous_doc}, config)
 
 
 async def test_valid_draft_finishes_in_one_attempt():
@@ -129,6 +137,54 @@ async def test_session_resumes_from_checkpoint_after_failure():
     assert state["status"] == "done"
 
 
-def test_find_issues_uses_word_boundaries():
-    assert find_issues("GetUser の説明", ["Get"]) == ["次の公開識別子が設計書に記載されていません: Get"]
-    assert find_issues("Get と GetUser の説明", ["Get", "GetUser"]) == []
+def test_find_doc_issues_uses_word_boundaries():
+    assert find_doc_issues("GetUser の説明", "", ["Get"]) == ["次の公開識別子が設計書に記載されていません: Get"]
+    assert find_doc_issues("Get と GetUser の説明", "", ["Get", "GetUser"]) == []
+
+
+def commented(source: str) -> str:
+    """コメント追記スキルの出力を模して、宣言の前にコメントを入れる（コードは変えない）。"""
+    return source.replace("func NewService", "// NewService はサービスを作る。\nfunc NewService").replace(
+        "type User struct", "// User は利用者を表す。\ntype User struct"
+    )
+
+
+def compile_comment_graph(llm, *, max_attempts=3):
+    task = comment_task("コメントスキル", Path("skills"), date(2026, 11, 3), max_input_chars=100_000)
+    return compile_graph(llm, max_attempts=max_attempts, task=task)
+
+
+async def test_comment_task_accepts_source_with_only_comments_added():
+    llm = ScriptedLLM([reply("```go\n" + commented(SAMPLE_GO) + "```")])
+
+    state = await run(compile_comment_graph(llm))
+
+    assert state["status"] == "done"
+    assert state["draft"] == commented(SAMPLE_GO).strip()
+    # 出力はファイル全文なので、元のソースをそのままプロンプトに渡す
+    assert SAMPLE_GO in llm.calls[0][-1].content
+
+
+async def test_comment_task_retries_when_code_is_changed():
+    broken = commented(SAMPLE_GO).replace('errors.New("empty id")', 'errors.New("id is empty")')
+    llm = ScriptedLLM([reply(broken), reply(commented(SAMPLE_GO))])
+
+    state = await run(compile_comment_graph(llm))
+
+    assert state["status"] == "done"
+    assert state["attempts"] == 2
+    feedback = llm.calls[1][-1].content
+    assert "コメント以外のコードが変更されています" in feedback
+    assert "22 行目付近" in feedback
+
+
+async def test_comment_task_does_not_receive_previous_output():
+    llm = ScriptedLLM([reply(commented(SAMPLE_GO))])
+
+    await run(compile_comment_graph(llm))
+
+    assert "前回" not in llm.calls[0][-1].content
+
+
+def test_find_comment_issues_rejects_empty_output():
+    assert find_comment_issues("  ", SAMPLE_GO, []) == ["Goファイルの本文が空です"]

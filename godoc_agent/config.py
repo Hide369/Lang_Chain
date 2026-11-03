@@ -27,6 +27,7 @@ class Settings:
     checkpoint_db: Path
     claude_bin: str
     claude_skill_path: Path | None
+    claude_comment_skill_path: Path | None
     claude_max_turns: int
     claude_timeout_s: int
 
@@ -36,6 +37,12 @@ class Settings:
         # 1トークン≒3文字（Goコード+日本語の保守的な見積り）とし、Claude Code の指示文・
         # スキル・関連ファイル・出力の分として半分をエージェントの作業領域に残す。
         return self.num_ctx * 3 // 2
+
+    @property
+    def max_comment_source_chars(self) -> int:
+        # コメント追記はファイル全文を出力するため、1回の応答の出力上限(LLM_NUM_PREDICT)にも収める。
+        # 1トークン≒3文字とし、追記するコメントの分として出力上限の半分を残す
+        return min(self.max_source_chars, self.num_predict * 3 // 2)
 
 
 def load_settings() -> Settings:
@@ -50,6 +57,7 @@ def load_settings() -> Settings:
         checkpoint_db=Path(os.getenv("CHECKPOINT_DB", base_dir / "state" / "checkpoints.sqlite")),
         claude_bin=os.getenv("CLAUDE_BIN", "claude"),
         claude_skill_path=Path(skill) if (skill := os.getenv("CLAUDE_SKILL_PATH")) else None,
+        claude_comment_skill_path=Path(skill) if (skill := os.getenv("CLAUDE_COMMENT_SKILL_PATH")) else None,
         claude_max_turns=_int_env("CLAUDE_MAX_TURNS", 30),
         # エージェントはファイルを読みながら複数回LLMを呼ぶため、長めに取る
         claude_timeout_s=_int_env("CLAUDE_TIMEOUT_S", 1800),

@@ -6,6 +6,7 @@ TODO(技術的負債): 抽出は正規表現による簡易版。ジェネリク
 
 import hashlib
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -24,6 +25,8 @@ _TYPE_BLOCK_ENTRY_RE = re.compile(r"^[ \t](\w+)\b", re.MULTILINE)
 _IMPORT_BLOCK_RE = re.compile(r"^import\s*\((.*?)\)", re.MULTILINE | re.DOTALL)
 _IMPORT_LINE_RE = re.compile(r'^import\s+(?:\w+\s+)?"([^"]+)"', re.MULTILINE)
 _QUOTED_RE = re.compile(r'"([^"]+)"')
+# 識別子・数値はひとかたまり、記号は1文字ずつ。"a+b" と "a + b" を同じトークン列にする
+_CODE_TOKEN_RE = re.compile(r"\w+|\n|[^\w\s]")
 
 
 @dataclass(frozen=True)
@@ -84,10 +87,85 @@ def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _scan(source: str) -> Iterator[tuple[str, str, int]]:
+    """ソースを ("comment" | "string" | "code", 文字列, 開始行) に分ける。
+
+    文字列リテラルを区別するのは、"http://..." の "//" をコメントと誤認しないため。
+    """
+    i, line, n = 0, 1, len(source)
+    while i < n:
+        c = source[i]
+        if source.startswith("//", i):
+            end = source.find("\n", i)
+            kind, j = "comment", n if end == -1 else end
+        elif source.startswith("/*", i):
+            end = source.find("*/", i + 2)
+            kind, j = "comment", n if end == -1 else end + 2
+        elif c == "`":
+            end = source.find("`", i + 1)
+            kind, j = "string", n if end == -1 else end + 1
+        elif c in "\"'":
+            j = i + 1
+            while j < n and source[j] not in (c, "\n"):
+                j += 2 if source[j] == "\\" else 1
+            kind, j = "string", min(j + 1, n)
+        else:
+            j = i + 1
+            while j < n and source[j] not in "/`\"'":
+                j += 1
+            kind = "code"
+        text = source[i:j]
+        yield kind, text, line
+        line += text.count("\n")
+        i = j
+
+
 def _strip_comments(source: str) -> str:
-    # コメント内の "func Foo(" などを誤検出しないよう、行コメントとブロックコメントを除去
-    source = re.sub(r"/\*.*?\*/", "", source, flags=re.DOTALL)
-    return re.sub(r"//[^\n]*", "", source)
+    # コメント内の "func Foo(" などを誤検出しないよう除去する（行番号は保つ）
+    return "".join("\n" * text.count("\n") if kind == "comment" else text for kind, text, _ in _scan(source))
+
+
+def _code_tokens(source: str) -> list[tuple[str, int]]:
+    """コメントと空白の違いを無視して比較するための (トークン, 行) の列。
+
+    Go は改行で文末を補うため改行だけは残し、連続する改行は1つにまとめる。
+    """
+    tokens: list[tuple[str, int]] = []
+
+    def newline(line: int) -> None:
+        if tokens and tokens[-1][0] != "\n":
+            tokens.append(("\n", line))
+
+    for kind, text, line in _scan(source):
+        if kind == "comment":
+            if "\n" in text:  # 改行を含むブロックコメントは改行として扱われる
+                newline(line)
+        elif kind == "string":
+            tokens.append((text, line))
+        else:
+            for m in _CODE_TOKEN_RE.finditer(text):
+                tok_line = line + text.count("\n", 0, m.start())
+                if m.group() == "\n":
+                    newline(tok_line)
+                else:
+                    tokens.append((m.group(), tok_line))
+    if tokens and tokens[-1][0] == "\n":
+        tokens.pop()
+    return tokens
+
+
+def first_code_difference(original: str, modified: str) -> int | None:
+    """コメントと空白以外に違いがあれば、元のソースでの最初の差分の行番号を返す。"""
+    before, after = _code_tokens(original), _code_tokens(modified)
+    for (b, line), (a, _) in zip(before, after):
+        if a != b:
+            return line
+    if len(before) > len(after):
+        # 改行トークンは前の行に属するため、削られた最初のコードの行を示す
+        return next((line for tok, line in before[len(after):] if tok != "\n"), before[-1][1])
+    if len(before) < len(after):
+        return before[-1][1] if before else 1
+    return None
 
 
 def extract_facts(source: str) -> GoFacts:
