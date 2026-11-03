@@ -70,6 +70,22 @@ async def test_generates_docs_and_skips_unchanged_files_next_time(env, monkeypat
     assert await run_batch(repo, out, "--run-id", "r2") == 0
 
 
+async def test_changed_file_is_revised_from_previous_doc(env, monkeypatch, repo, tmp_path):
+    out = tmp_path / "out"
+    use_llm(monkeypatch, ScriptedLLM([reply(good_doc("Health") + "\n履歴 v1.0"), reply(good_doc("GetUser"))]))
+    assert await run_batch(repo, out) == 0
+
+    (repo / HEALTH).write_text("package handler\n\nfunc Health() { _ = 1 }\n", encoding="utf-8")
+    llm = ScriptedLLM([reply(good_doc("Health") + "\n履歴 v1.0 / v1.1")])
+    use_llm(monkeypatch, llm)
+    assert await run_batch(repo, out, "--run-id", "r2") == 0
+
+    # 変更されたファイルだけが、前回の設計書（履歴）を添えて再生成される
+    assert len(llm.calls) == 1
+    assert "履歴 v1.0" in llm.calls[0][-1].content
+    assert (out / f"{HEALTH}.md").read_text(encoding="utf-8").endswith("v1.0 / v1.1\n")
+
+
 async def test_one_failing_file_does_not_stop_the_batch(env, monkeypatch, repo, tmp_path):
     out = tmp_path / "out"
     # health.go → 失敗、user.go → 成功

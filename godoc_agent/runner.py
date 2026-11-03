@@ -13,7 +13,7 @@ import sys
 import time
 from collections import Counter
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from functools import partial
 from pathlib import Path
 
@@ -76,7 +76,7 @@ class Manifest:
 
 
 async def process_file(
-    graph, sem: asyncio.Semaphore, run_id: str, rel_path: str, source: str, source_hash: str
+    graph, sem: asyncio.Semaphore, run_id: str, rel_path: str, source: str, source_hash: str, previous_path: Path
 ) -> FileResult:
     thread_id = thread_id_for(run_id, rel_path)
     config = {"configurable": {"thread_id": thread_id}, "run_name": f"design-doc:{rel_path}"}
@@ -89,7 +89,9 @@ async def process_file(
             elif snapshot.values.get("status") == "done":
                 state = snapshot.values  # このrun_idで生成済み（出力の書き出しだけ行う）
             else:
-                state = await graph.ainvoke({"rel_path": rel_path, "source": source}, config)
+                # 既存の設計書があれば渡し、履歴（バージョン）を引き継いで改訂させる
+                previous_doc = previous_path.read_text(encoding="utf-8") if previous_path.is_file() else None
+                state = await graph.ainvoke({"rel_path": rel_path, "source": source, "previous_doc": previous_doc}, config)
         except Exception as e:  # 1件の失敗でバッチ全体を止めず、記録して次へ進む
             return FileResult(
                 rel_path, source_hash, thread_id, "error", time.perf_counter() - started,
@@ -160,6 +162,9 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
         return 0
 
     await preflight(settings)
+    # エージェントは読み取り系ツールしか使えず日付を調べられないため、ここで渡す。
+    # 実行中に日付をまたいでも、同じ実行の設計書はすべて同じ日付になるよう一度だけ取得する
+    today = date.today()
     metrics_path = out_dir / "_runs" / f"{args.run_id}.jsonl"
     sem = asyncio.Semaphore(settings.concurrency)
     results: list[FileResult] = []
@@ -168,13 +173,15 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
     async with AsyncSqliteSaver.from_conn_string(str(settings.checkpoint_db)) as checkpointer:
         graph = build_doc_graph(
             llm,
-            partial(build_agent_messages, skill, skill_dir),
+            partial(build_agent_messages, skill, skill_dir, today),
             max_source_chars=settings.max_source_chars,
             max_attempts=settings.max_attempts,
         ).compile(checkpointer=checkpointer)
 
         tasks = [
-            asyncio.create_task(process_file(graph, sem, args.run_id, rel_path, source, source_hash))
+            asyncio.create_task(process_file(
+                graph, sem, args.run_id, rel_path, source, source_hash, output_path_for(out_dir, rel_path)
+            ))
             for rel_path, source, source_hash in targets
         ]
         with metrics_path.open("a", encoding="utf-8") as metrics_file:
