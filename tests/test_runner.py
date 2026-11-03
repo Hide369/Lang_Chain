@@ -140,6 +140,80 @@ async def test_runs_claude_code_in_repo_and_retries_in_same_session(env, monkeyp
     assert option(calls[2]["argv"], "--resume") == "s-user"
 
 
+def read_logs(out: Path) -> dict[str, dict]:
+    lines = (out / "_runs" / "r1.jsonl").read_text(encoding="utf-8").splitlines()
+    return {log["rel_path"]: log for log in map(json.loads, lines)}
+
+
+async def test_input_near_context_limit_is_warned_without_failing(env, monkeypatch, repo, tmp_path, fake_claude, capsys):
+    monkeypatch.setenv("CLAUDE_BIN", fake_claude.bin)
+    monkeypatch.setenv("LLM_NUM_CTX", "10000")
+    monkeypatch.setenv("LLM_CTX_WARN_RATIO", "0.9")
+    fake_claude.respond(
+        # health.go: キャッシュ分を含めると 9,500 トークンで 90%（9,000）を超える
+        claude_result(good_doc("Health"), usage={"input_tokens": 500, "cache_read_input_tokens": 9000, "output_tokens": 10}),
+        # user.go: 8,000 トークンで超えない
+        claude_result(good_doc("GetUser"), usage={"input_tokens": 8000, "output_tokens": 10}),
+    )
+    out = tmp_path / "out"
+
+    # 警告があっても合否は変わらず、出力も保存される
+    assert await run_batch(repo, out) == 0
+
+    assert (out / f"{HEALTH}.md").is_file()
+    logs = read_logs(out)
+    assert logs[HEALTH]["status"] == "done"
+    assert logs[HEALTH]["issues"] == []
+    assert logs[HEALTH]["llm_calls"][0]["total_input_tokens"] == 9500
+    assert len(logs[HEALTH]["warnings"]) == 1
+    assert "9500 トークン" in logs[HEALTH]["warnings"][0]
+    assert logs[USER]["warnings"] == []
+    printed = capsys.readouterr().out
+    assert "[警告: " in printed
+    assert "入力トークン(1回あたり): 最大 9500 / 平均 8750" in printed
+
+
+async def test_missing_usage_is_logged_as_null_without_warning(env, monkeypatch, repo, tmp_path, fake_claude):
+    monkeypatch.setenv("CLAUDE_BIN", fake_claude.bin)
+    no_usage = [claude_result(good_doc(name)) for name in ("Health", "GetUser")]
+    for response in no_usage:
+        del response["json"]["usage"]
+    fake_claude.respond(*no_usage)
+    out = tmp_path / "out"
+
+    assert await run_batch(repo, out) == 0
+
+    call = read_logs(out)[HEALTH]["llm_calls"][0]
+    assert call["input_tokens"] is None
+    assert call["total_input_tokens"] is None
+    assert read_logs(out)[HEALTH]["warnings"] == []
+
+
+def test_summary_shows_input_tokens_only_when_known():
+    def result(*totals):
+        calls = [{"num_turns": 3, "total_input_tokens": t} for t in totals]
+        return runner.FileResult("doc", "a.go", "h", "t", "done", 1.0, llm_calls=calls)
+
+    assert "入力トークン" not in runner.summarize([result(None)], 60)
+    summary = runner.summarize([result(1000, None), result(3000)], 60)
+    assert "入力トークン(1回あたり): 最大 3000 / 平均 2000（3 回中 2 回で取得）" in summary
+
+
+@pytest.mark.parametrize("value", ["0", "1.5", "-0.1", "abc", "nan"])
+def test_invalid_ctx_warn_ratio_is_rejected(monkeypatch, value):
+    monkeypatch.setenv("LLM_CTX_WARN_RATIO", value)
+
+    with pytest.raises(ValueError, match="LLM_CTX_WARN_RATIO"):
+        load_settings()
+
+
+def test_ctx_warn_ratio_accepts_upper_bound(monkeypatch):
+    monkeypatch.setenv("LLM_CTX_WARN_RATIO", "1")
+    monkeypatch.setenv("LLM_NUM_CTX", "8192")
+
+    assert load_settings().ctx_warn_tokens == 8192
+
+
 async def test_requires_skill_path(env, monkeypatch, repo, tmp_path):
     monkeypatch.delenv("CLAUDE_SKILL_PATH")
 

@@ -43,6 +43,30 @@ async def test_valid_draft_finishes_in_one_attempt():
     assert [m.content for m in llm.calls[0]] == ["user/service.go の設計書を作成: GetUser, NewService, Repository, User"]
 
 
+async def test_input_tokens_including_cache_are_recorded_per_call():
+    response = reply(good_doc(*ALL_EXPORTED))
+    response.response_metadata.update(input_tokens=1000, cache_read_input_tokens=20000, cache_creation_input_tokens=None)
+    llm = ScriptedLLM([response])
+
+    state = await run(compile_graph(llm))
+
+    call = state["llm_calls"][0]
+    assert call["input_tokens"] == 1000
+    assert call["cache_read_input_tokens"] == 20000
+    assert call["cache_creation_input_tokens"] is None
+    # 返ってきた値だけを合計する（キャッシュ分も入力の一部）
+    assert call["total_input_tokens"] == 21000
+
+
+async def test_unknown_input_tokens_are_recorded_as_none():
+    llm = ScriptedLLM([reply(good_doc(*ALL_EXPORTED), input_tokens=None)])
+
+    state = await run(compile_graph(llm))
+
+    assert state["status"] == "done"
+    assert state["llm_calls"][0]["total_input_tokens"] is None
+
+
 async def test_code_fence_around_output_is_removed():
     llm = ScriptedLLM([reply("```markdown\n" + good_doc(*ALL_EXPORTED) + "```")])
 

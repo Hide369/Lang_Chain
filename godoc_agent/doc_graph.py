@@ -47,12 +47,20 @@ def _strip_fence(text: str) -> str:
     return m.group(1) if m else text.strip()
 
 
+_INPUT_TOKEN_KEYS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+
+
 def _call_metrics(response: AIMessage, elapsed_s: float) -> dict:
     meta = response.response_metadata or {}
+    inputs = {k: meta.get(k) for k in _INPUT_TOKEN_KEYS}
+    known = [v for v in inputs.values() if v is not None]
     return {
         "elapsed_s": round(elapsed_s, 2),
         "num_turns": meta.get("num_turns"),
         "output_tokens": meta.get("output_tokens"),
+        **inputs,
+        # キャッシュ分を含めた入力全体。usage が返らなければ不明(None)とし、0 とは区別する
+        "total_input_tokens": sum(known) if known else None,
     }
 
 
