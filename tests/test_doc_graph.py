@@ -8,8 +8,9 @@ from godoc_agent.doc_graph import build_doc_graph, find_issues
 ALL_EXPORTED = ("GetUser", "NewService", "Repository", "User")
 
 
-def initial_messages(rel_path, facts):
-    return [HumanMessage(f"{rel_path} の設計書を作成: {', '.join(facts.exported)}")]
+def initial_messages(rel_path, facts, previous_doc):
+    revision = f" 前回: {previous_doc}" if previous_doc else ""
+    return [HumanMessage(f"{rel_path} の設計書を作成: {', '.join(facts.exported)}{revision}")]
 
 
 def compile_graph(llm, *, max_attempts=3, max_source_chars=100_000):
@@ -17,9 +18,9 @@ def compile_graph(llm, *, max_attempts=3, max_source_chars=100_000):
     return graph.compile(checkpointer=InMemorySaver())
 
 
-async def run(graph, thread_id="t1", source=SAMPLE_GO):
+async def run(graph, thread_id="t1", source=SAMPLE_GO, previous_doc=None):
     config = {"configurable": {"thread_id": thread_id}}
-    return await graph.ainvoke({"rel_path": "user/service.go", "source": source}, config)
+    return await graph.ainvoke({"rel_path": "user/service.go", "source": source, "previous_doc": previous_doc}, config)
 
 
 async def test_valid_draft_finishes_in_one_attempt():
@@ -80,6 +81,24 @@ async def test_oversized_source_is_rejected_before_calling_llm():
     llm = ScriptedLLM([])
 
     state = await run(compile_graph(llm, max_source_chars=10))
+
+    assert state["status"] == "too_large"
+    assert llm.calls == []
+
+
+async def test_previous_doc_is_passed_to_initial_messages():
+    llm = ScriptedLLM([reply(good_doc(*ALL_EXPORTED))])
+
+    await run(compile_graph(llm), previous_doc="前回の設計書 v1.0")
+
+    assert "前回の設計書 v1.0" in llm.calls[0][0].content
+
+
+async def test_previous_doc_counts_toward_size_limit():
+    # 前回の設計書もプロンプトに入るため、ソースと合わせて上限を判定する
+    llm = ScriptedLLM([])
+
+    state = await run(compile_graph(llm, max_source_chars=len(SAMPLE_GO) + 5), previous_doc="x" * 10)
 
     assert state["status"] == "too_large"
     assert llm.calls == []

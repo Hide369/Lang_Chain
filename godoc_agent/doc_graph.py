@@ -21,8 +21,8 @@ from .prompts import build_feedback
 
 _FENCE_RE = re.compile(r"^```(?:markdown|md)?\s*\n(.*)\n```\s*$", re.DOTALL)
 
-# (rel_path, facts) -> 最初に送るメッセージ
-InitialMessages = Callable[[str, GoFacts], list[AnyMessage]]
+# (rel_path, facts, previous_doc) -> 最初に送るメッセージ
+InitialMessages = Callable[[str, GoFacts, str | None], list[AnyMessage]]
 
 Status = Literal["pending", "done", "too_large", "failed_validation"]
 
@@ -34,6 +34,7 @@ class ChatModel(Protocol):
 class DocState(TypedDict, total=False):
     rel_path: str
     source: str
+    previous_doc: str | None  # 前回生成した設計書。履歴を引き継いで改訂するために渡す
     exported: list[str]
     messages: list[AnyMessage]
     draft: str
@@ -77,12 +78,15 @@ def build_doc_graph(
 ) -> StateGraph:
     def prepare(state: DocState) -> DocState:
         source = state["source"]
-        if len(source) > max_source_chars:
-            return {"status": "too_large", "issues": [f"ソースが {len(source)} 文字で上限 {max_source_chars} を超えています"]}
+        previous_doc = state.get("previous_doc")
+        # 前回の設計書もプロンプトに入るため、ソースと合わせて上限を判定する
+        total = len(source) + len(previous_doc or "")
+        if total > max_source_chars:
+            return {"status": "too_large", "issues": [f"ソースと前回の設計書が計 {total} 文字で上限 {max_source_chars} を超えています"]}
         facts = extract_facts(source)
         return {
             "exported": facts.exported,
-            "messages": initial_messages(state["rel_path"], facts),
+            "messages": initial_messages(state["rel_path"], facts, previous_doc),
             "attempts": 0,
             "llm_calls": [],
             "status": "pending",

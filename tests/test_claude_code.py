@@ -1,4 +1,5 @@
 import os
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -116,10 +117,25 @@ def test_load_skill_requires_existing_path(tmp_path):
 def test_agent_messages_embed_skill_and_target_file(tmp_path):
     facts = extract_facts("package h\n\nfunc GetUser() {}\n")
 
-    system, human = build_agent_messages("スキル本文 {placeholder}", tmp_path, "user_api/pkg/handler/user.go", facts)
+    system, human = build_agent_messages(
+        "スキル本文 {placeholder}", tmp_path, date(2026, 11, 3), "user_api/pkg/handler/user.go", facts, None
+    )
 
     # スキル内の波括弧はそのまま残る（format の置換対象にならない）
     assert "スキル本文 {placeholder}" in system.content
     assert str(tmp_path) in system.content
+    assert "2026-11-03" in system.content
     assert "user_api/pkg/handler/user.go" in human.content
     assert "GetUser" in human.content
+    assert "新規作成" in human.content
+
+
+def test_agent_messages_carry_over_previous_doc_for_history(tmp_path):
+    facts = extract_facts("package h\n\nfunc GetUser() {}\n")
+    previous = "# 設計書\n## 履歴\n| 1.0 | 2026-11-01 | 初版 |\n"
+
+    _, human = build_agent_messages("スキル", tmp_path, date(2026, 11, 3), "h/user.go", facts, previous)
+
+    assert previous in human.content
+    assert "履歴" in human.content
+    assert "新規作成" not in human.content
