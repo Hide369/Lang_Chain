@@ -1,0 +1,40 @@
+# 処理対象の言語・フォルダ・ファイル・除外の設定。
+# 変更するときは targets.toml にコピーして編集する（targets.toml はコミットしない）。
+# targets.toml がなければこのファイルが使われる。別の場所に置く場合は .env の TARGETS_CONFIG にパスを書く。
+# 書き方は docs/target_files.md を参照。
+#
+# パターンは --repo からの相対パス（/ 区切り）と照合する glob 形式:
+#   *  … / を含まない任意の文字列   ?  … / 以外の1文字
+#   ** … 0個以上のフォルダ（末尾の "/**" はそのフォルダの下のすべて）
+# include は --repo のフォルダ名を先頭に付けたパスとも照合する（--repo に xx_api 自体を指定した場合のため）。
+
+# すべての言語に共通の除外
+exclude = [
+    "**/.*/**",            # . で始まるフォルダ（.git など）の下
+    "**/vendor/**",
+    "**/testdata/**",
+    "**/node_modules/**",
+]
+
+[[languages]]
+name = "go"                # 解析に使う言語: go / csharp / typescript
+extensions = [".go"]
+# <xx>_api/pkg/handler の下（サブフォルダを含む）。? は xx 部分が1文字以上あることを表す
+include = ["**/?*_api/pkg/handler/**"]
+exclude = ["**/*_test.go"]
+
+# C# の例。使うときは enabled = true にし、include を実際のフォルダ構成に合わせる
+[[languages]]
+name = "csharp"
+enabled = false
+extensions = [".cs"]
+include = ["**/Controllers/**"]
+exclude = ["**/bin/**", "**/obj/**", "**/*Tests.cs", "**/*.Designer.cs", "**/*.g.cs"]
+
+# TypeScript の例。使うときは enabled = true にし、include を実際のフォルダ構成に合わせる
+[[languages]]
+name = "typescript"
+enabled = false
+extensions = [".ts", ".tsx"]
+include = ["**/src/handlers/**"]
+exclude = ["**/dist/**", "**/*.test.ts", "**/*.spec.ts", "**/*.test.tsx", "**/*.spec.tsx", "**/*.d.ts"]

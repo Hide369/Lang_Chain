@@ -1,4 +1,4 @@
-"""Goファイル1本に対して行う処理（タスク）の定義。
+"""ソースファイル1本に対して行う処理（タスク）の定義。
 
 タスクごとにスキル・プロンプト・検証・出力先が異なり、グラフ（doc_graph）と
 バッチ（runner）はこの定義に従って同じ流れで処理する。
@@ -12,7 +12,7 @@ from pathlib import Path
 
 from langchain_core.messages import AnyMessage, HumanMessage
 
-from .go_source import GoFacts, first_code_difference
+from .source_common import SourceFacts, first_code_difference
 from .prompts import build_agent_messages, build_comment_feedback, build_comment_messages, build_doc_feedback
 
 DOC = "doc"
@@ -20,7 +20,7 @@ COMMENT = "comment"
 TASK_NAMES = (DOC, COMMENT)
 
 # (rel_path, source, facts, previous_output) -> 最初に送るメッセージ
-InitialMessages = Callable[[str, str, GoFacts, str | None], list[AnyMessage]]
+InitialMessages = Callable[[str, str, SourceFacts, str | None], list[AnyMessage]]
 # (draft, source, exported) -> 問題点（なければ空）
 FindIssues = Callable[[str, str, list[str]], list[str]]
 
@@ -34,7 +34,7 @@ class Task:
     build_feedback: Callable[[list[str]], HumanMessage]
     max_input_chars: int
     out_subdir: str  # --out からの相対フォルダ（"" は --out 直下）
-    out_suffix: str  # 出力ファイル名 = Goファイル名 + out_suffix
+    out_suffix: str  # 出力ファイル名 = ソースファイル名 + out_suffix
     uses_previous_output: bool  # 前回の出力を渡して改訂させるか
 
     def output_path(self, out_dir: Path, rel_path: str) -> Path:
@@ -58,7 +58,7 @@ def find_doc_issues(draft: str, source: str, exported: list[str]) -> list[str]:
 def find_comment_issues(draft: str, source: str, exported: list[str]) -> list[str]:
     # コメントの書き方は SKILL.md に任せ、ここではコードが壊されていないことだけを保証する
     if not draft.strip():
-        return ["Goファイルの本文が空です"]
+        return ["ファイルの本文が空です"]
     line = first_code_difference(source, draft)
     if line is not None:
         return [
@@ -87,7 +87,7 @@ def design_doc_task(skill: str, skill_dir: Path, today: date, *, max_input_chars
 def comment_task(skill: str, skill_dir: Path, today: date, *, max_input_chars: int) -> Task:
     return Task(
         name=COMMENT,
-        run_name="go-comment",
+        run_name="comment",
         initial_messages=lambda rel_path, source, facts, previous: build_comment_messages(
             skill, skill_dir, today, rel_path, source, facts
         ),
@@ -97,6 +97,6 @@ def comment_task(skill: str, skill_dir: Path, today: date, *, max_input_chars: i
         # 元のリポジトリは書き換えず、コメントを追記したファイルを別フォルダに出力する
         out_subdir="_commented",
         out_suffix="",
-        # Goリポジトリ側のソースは変わらないため、毎回元のソースから追記させる
+        # 元のリポジトリのソースは変わらないため、毎回元のソースから追記させる
         uses_previous_output=False,
     )

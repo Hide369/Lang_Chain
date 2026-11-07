@@ -5,9 +5,9 @@ from pathlib import Path
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from .go_source import GoFacts
+from .source_common import SourceFacts
 
-AGENT_SYSTEM_PROMPT = """あなたはGoの詳細設計書を一括生成するバッチ処理の一部として、非対話で動作しています。
+AGENT_SYSTEM_PROMPT = """あなたは{language}の詳細設計書を一括生成するバッチ処理の一部として、非対話で動作しています。
 <skill> に書かれた詳細設計書スキルの手順と記述ルールに従ってください。
 
 バッチ処理のため、次のルールをスキルの記述より優先します:
@@ -46,17 +46,17 @@ REVISION_SECTION = """## 前回の設計書（改訂）
 
 
 def build_agent_messages(
-    skill: str, skill_dir: Path, today: date, rel_path: str, facts: GoFacts, previous_doc: str | None
+    skill: str, skill_dir: Path, today: date, rel_path: str, facts: SourceFacts, previous_doc: str | None
 ) -> list:
     history = REVISION_SECTION.format(previous_doc=previous_doc) if previous_doc else NEW_DOC_SECTION
-    human = f"""次のGoファイルの詳細設計書を作成してください: {rel_path}
-（作業ディレクトリがGoリポジトリのルートです。対象ファイルや関連ファイルは Read / Grep / Glob で参照してください）
+    human = f"""次の{facts.language}ファイルの詳細設計書を作成してください: {rel_path}
+（作業ディレクトリがリポジトリのルートです。対象ファイルや関連ファイルは Read / Grep / Glob で参照してください）
 
 ## 抽出済みの事実（静的解析の結果。これと矛盾する記述をしないこと。公開識別子はすべて設計書内で言及すること）
 {facts.to_prompt()}
 
 {history}"""
-    system = AGENT_SYSTEM_PROMPT.format(skill_dir=skill_dir, today=today.isoformat(), skill=skill)
+    system = AGENT_SYSTEM_PROMPT.format(language=facts.language, skill_dir=skill_dir, today=today.isoformat(), skill=skill)
     return [SystemMessage(content=system), HumanMessage(content=human)]
 
 
@@ -67,12 +67,12 @@ def build_doc_feedback(issues: list[str]) -> HumanMessage:
     )
 
 
-COMMENT_SYSTEM_PROMPT = """あなたはGoファイルへのコメント追記を一括で行うバッチ処理の一部として、非対話で動作しています。
+COMMENT_SYSTEM_PROMPT = """あなたは{language}ファイルへのコメント追記を一括で行うバッチ処理の一部として、非対話で動作しています。
 <skill> に書かれたコメント追記スキルの手順と記述ルールに従ってください。
 
 バッチ処理のため、次のルールをスキルの記述より優先します:
 - ファイルの作成・編集やコマンドの実行はしない。スキルにファイルを編集する手順があっても、書き出しはバッチ側が行う
-- コメントを追記したGoファイルの全文だけを最終応答として出力する。前置き・説明・```での囲みは付けない
+- コメントを追記した{language}ファイルの全文だけを最終応答として出力する。前置き・説明・```での囲みは付けない
 - コメント以外のコードは変更しない。識別子・式・文字列・import・宣言の順序などはそのまま残し、変えてよいのはコメントと空白だけとする
   （コメント以外の差分はバッチ側で機械的に検出され、やり直しになる）
 - ユーザーへの質問はしない（回答は得られない）
@@ -86,11 +86,11 @@ COMMENT_SYSTEM_PROMPT = """あなたはGoファイルへのコメント追記を
 
 
 def build_comment_messages(
-    skill: str, skill_dir: Path, today: date, rel_path: str, source: str, facts: GoFacts
+    skill: str, skill_dir: Path, today: date, rel_path: str, source: str, facts: SourceFacts
 ) -> list:
     # 出力はファイルの全文なので、読み違いが起きないよう現在の内容をそのまま渡す
-    human = f"""次のGoファイルにコメントを追記してください: {rel_path}
-（作業ディレクトリがGoリポジトリのルートです。関連ファイルは Read / Grep / Glob で参照してください）
+    human = f"""次の{facts.language}ファイルにコメントを追記してください: {rel_path}
+（作業ディレクトリがリポジトリのルートです。関連ファイルは Read / Grep / Glob で参照してください）
 
 ## 抽出済みの事実（静的解析の結果）
 {facts.to_prompt()}
@@ -99,12 +99,12 @@ def build_comment_messages(
 <source>
 {source}
 </source>"""
-    system = COMMENT_SYSTEM_PROMPT.format(skill_dir=skill_dir, today=today.isoformat(), skill=skill)
+    system = COMMENT_SYSTEM_PROMPT.format(language=facts.language, skill_dir=skill_dir, today=today.isoformat(), skill=skill)
     return [SystemMessage(content=system), HumanMessage(content=human)]
 
 
 def build_comment_feedback(issues: list[str]) -> HumanMessage:
     bullet = "\n".join(f"- {i}" for i in issues)
     return HumanMessage(
-        content=f"直前の出力には次の問題があります。修正したGoファイルの全文を出力し直してください。\n{bullet}"
+        content=f"直前の出力には次の問題があります。修正したファイルの全文を出力し直してください。\n{bullet}"
     )

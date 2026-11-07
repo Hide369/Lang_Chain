@@ -7,21 +7,23 @@ GB10サーバー上で動かし、クライアントのClaude CodeからSSH経�
 モデルは Ollama の Anthropic 互換API経由で qwen3-coder-next を使うため、ソースコードはサーバーの外に出ない。
 LangGraph は、その外側で並列制御・差分スキップ・再開・検証・計測を受け持つ。
 
-同じ仕組みで、**Goファイルにコメントを追記するスキル**も一括で実行できる（`CLAUDE_COMMENT_SKILL_PATH` を設定した場合。[コメント追記](#コメント追記)を参照）。
+同じ仕組みで、**ソースファイルにコメントを追記するスキル**も一括で実行できる（`CLAUDE_COMMENT_SKILL_PATH` を設定した場合。[コメント追記](#コメント追記)を参照）。
 
 runner は常駐サービスではなく、起動すると対象ファイルを処理して終了する**バッチ**である（常駐するのは Ollama だけ）。
 必要なときに起動するか、[定期実行（systemd タイマー）](#定期実行systemd-タイマー) で毎晩自動実行する。
 
 ## 設計方針（方式A：1ファイル = 1セッション）
 
-- Goファイル1本×タスク（設計書 `doc` / コメント追記 `comment`）ごとに独立した `thread_id` でグラフを実行する。前のファイルのコンテキストは一切持ち込まない
+- ソースファイル1本×タスク（設計書 `doc` / コメント追記 `comment`）ごとに独立した `thread_id` でグラフを実行する。前のファイルのコンテキストは一切持ち込まない
 - `thread_id = <run_id>:<タスク>:<パスのハッシュ>`。同じ `--run-id` で再実行すると、失敗・中断したものだけがチェックポイントから再開される
 - ソースのハッシュをタスクごとに記録し（設計書は `out/.manifest.json`、コメント追記は `out/_commented/.manifest.json`）、変更のないファイルは次回以降スキップする
 - 設計書の構成・書き方は SKILL.md に任せる。検証するのは、本文が空でないことと、公開識別子（静的解析で抽出）がすべて記載されていることだけ
-- 設計書の対象は **`<xx>_api/pkg/handler/` 配下（サブディレクトリを含む）のGoファイルだけ**（`xx` は任意）
+- 処理対象の言語・フォルダ・ファイル・除外は設定ファイル `targets.toml`（なければ [targets.example.toml](targets.example.toml)）で決める。対応言語は Go・C#・TypeScript（[docs/target_files.md](docs/target_files.md)）
+- 設計書スキルはすべての言語で共通の `skills/design-doc-batch/SKILL.md` を使う。言語ごとに変わるのはプロンプト中の言語名と、公開識別子の抽出方法だけ
+- 既定（targets.example.toml）の対象は **`<xx>_api/pkg/handler/` 配下（サブディレクトリを含む）のGoファイルだけ**（`xx` は任意）
   - `--repo` には、複数の `xx_api` を含む親ディレクトリと、`xx_api` 自体のどちらを指定してもよい（複数の API を扱うなら親ディレクトリを推奨。「3. 設計書を取得する」の注意を参照）
   - 例：対象 `user_api/pkg/handler/user.go`、`user_api/pkg/handler/admin/role.go` ／ 対象外 `user_api/pkg/model/user.go`、`user_api/internal/pkg/handler/x.go`
-- 上記の配下でも、次のファイルは対象外（常に除外され、オプションで含めることはできない）
+- 上記の配下でも、次のファイルは対象外
   - テストコード（ファイル名が `_test.go` で終わるもの）
   - `vendor/`、`testdata/`、`node_modules/`、`.` で始まるディレクトリ配下のファイル
 
@@ -45,11 +47,13 @@ generate の中身（ファイルごと）:
 | [godoc_agent/runner.py](godoc_agent/runner.py) | バッチ実行、並列数制御、差分スキップ、再開、計測ログ |
 | [godoc_agent/claude_code.py](godoc_agent/claude_code.py) | `claude -p` の起動、Ollama への接続設定、セッションの継続（`--resume`） |
 | [godoc_agent/prompts.py](godoc_agent/prompts.py) | SKILL.md の読み込みと、エージェントへの指示の組み立て |
-| [godoc_agent/go_source.py](godoc_agent/go_source.py) | 対象Goファイルの列挙、関数・型などの事実抽出（簡易版）、コメント以外の差分検出 |
+| [godoc_agent/targets.py](godoc_agent/targets.py) | 対象の設定ファイル（targets.toml）の読み込みと、対象ファイルの列挙 |
+| [godoc_agent/analyzers.py](godoc_agent/analyzers.py) | 言語名から解析処理を引く（[go_source.py](godoc_agent/go_source.py)・[csharp_source.py](godoc_agent/csharp_source.py)・[typescript_source.py](godoc_agent/typescript_source.py)：関数・型・公開識別子などの事実抽出。いずれも正規表現の簡易版） |
+| [godoc_agent/source_common.py](godoc_agent/source_common.py) | 言語に共通する字句の分割と、コメント以外の差分検出 |
 | [godoc_agent/preflight.py](godoc_agent/preflight.py) | 開始前の Ollama 接続・モデル存在チェック |
 
 起動から終了までの処理の流れ（再開判定・検証・保存・終了コードなど）は [docs/workflow.md](docs/workflow.md) にまとめている。
-処理対象のフォルダや除外条件を変える手順は [docs/target_files.md](docs/target_files.md) にまとめている。
+処理対象の言語・フォルダ・ファイル・除外を変える手順は [docs/target_files.md](docs/target_files.md) にまとめている。
 
 ## サーバー(GB10)へのセットアップ
 
@@ -73,13 +77,13 @@ which claude         # tmux / nohup から起動する場合は、このフル�
 cd /opt/Lang_Chain
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env  # CLAUDE_SKILL_PATH・LLM_MODEL などを編集（LLM_NUM_CTX は 1. の OLLAMA_CONTEXT_LENGTH と同じ値にする）
+cp .env.example .env  # LLM_MODEL などを編集（LLM_NUM_CTX は 1. の OLLAMA_CONTEXT_LENGTH と同じ値にする）
 
 # 4. 既存のスキルをサーバーに置く（クライアントから実行。参照ファイルがあればフォルダごと）
-scp -r ~/.claude/skills/<設計書スキル名> gb10:/opt/Lang_Chain/skills/
+#    設計書スキルは skills/design-doc-batch/ に置く（フォルダ名を design-doc-batch にする。.env での指定は不要）
+scp -r ~/.claude/skills/design-doc-batch gb10:/opt/Lang_Chain/skills/
 scp -r ~/.claude/skills/<コメント追記スキル名> gb10:/opt/Lang_Chain/skills/   # コメント追記も行う場合
-#    置いた SKILL.md のパスを .env に書く
-#      CLAUDE_SKILL_PATH=/opt/Lang_Chain/skills/<設計書スキル名>/SKILL.md
+#    コメント追記スキルは、置いた SKILL.md のパスを .env に書く
 #      CLAUDE_COMMENT_SKILL_PATH=/opt/Lang_Chain/skills/<コメント追記スキル名>/SKILL.md
 
 # 5. テスト（Ollama・Claude Code 不要）。最後に「N passed」とだけ表示されれば成功
@@ -94,7 +98,7 @@ Ollama の接続先（`ANTHROPIC_BASE_URL` など）は runner が `claude` の�
 
 ### SKILL.md の扱い
 
-- SKILL.md の全文をシステムプロンプトに入れる。Claude Code のスキル検出には頼らないため、スキルの置き場所は問わない（`CLAUDE_SKILL_PATH` で指定）
+- SKILL.md の全文をシステムプロンプトに入れる。Claude Code のスキル検出には頼らないため、スキルの置き場所は問わない。設計書スキルの既定は `skills/design-doc-batch/SKILL.md`（別の場所に置く場合は `CLAUDE_SKILL_PATH` で指定）
 - SKILL.md と同じフォルダ（`references/` など）は `--add-dir` で読めるようにしている
 - 次のルールをスキルより優先させている：ファイルの作成・編集やコマンド実行をしない（保存は runner が行う）、設計書の本文だけを返す、質問しない
 - 対象ファイルのパスは runner がプロンプトで渡す（スキル内の `$ARGUMENTS` などのプレースホルダーは置換されない）
@@ -107,7 +111,7 @@ Ollama の接続先（`ANTHROPIC_BASE_URL` など）は runner が `claude` の�
 
 ### コメント追記
 
-`.env` に `CLAUDE_COMMENT_SKILL_PATH`（コメント追記スキルの SKILL.md）を設定すると、設計書の生成と同じ実行の中で、対象の各Goファイルにコメントを追記する。
+`.env` に `CLAUDE_COMMENT_SKILL_PATH`（コメント追記スキルの SKILL.md）を設定すると、設計書の生成と同じ実行の中で、対象の各ファイルにコメントを追記する。
 スキルの置き方・扱い（全文をシステムプロンプトに入れる、日付を渡す、ファイル編集をさせない等）は設計書のスキルと同じ。
 
 #### 有効にする手順（設計書の生成がすでに動いているサーバーに追加する場合）
@@ -220,7 +224,7 @@ python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --tasks comment
 | Ollama の設定（コンテキスト長など）とモデルの確認 | 要 |
 | Claude Code のインストール | 不要 |
 | このリポジトリの clone、venv 作成、`pip install` | `/opt` 配下なら要 |
-| `.env` の作成（`CLAUDE_SKILL_PATH`・`CLAUDE_BIN` など） | 不要 |
+| `.env` の作成（`CLAUDE_BIN` など） | 不要 |
 | SKILL.md（設計書・コメント追記）をクライアントから `scp` で配置 | 不要 |
 | Goリポジトリの clone と、パスワードなしで `git pull` できる設定（SSH鍵など） | 不要 |
 | GB10 のスリープ無効化（「クライアントPCを落としてよいか」参照） | 要 |
@@ -308,7 +312,7 @@ PCを再起動した後は、ログの末尾にサマリー（`対象: ... 件 /
 
 ### 3. 設計書を取得する
 
-設計書はサーバー上の `--out` 配下に、Goファイルと同じフォルダ構成で `<--repo からの相対パス>.go.md` として作られる。
+設計書はサーバー上の `--out` 配下に、ソースファイルと同じフォルダ構成で `<--repo からの相対パス>.go.md` として作られる。
 `--out ./out` のような相対パスは実行時のカレントディレクトリが基準になるため、このREADMEの手順（`/opt/Lang_Chain` で実行）では `/opt/Lang_Chain/out/` になる。
 
 ```
@@ -318,7 +322,7 @@ PCを再起動した後は、ログの末尾にサマリー（`対象: ... 件 /
 /srv/repos/myapp/order_api/pkg/handler/order.go  → /opt/Lang_Chain/out/order_api/pkg/handler/order.go.md
 /opt/Lang_Chain/out/.manifest.json                 … 生成済みファイルの記録（差分スキップ用）
 /opt/Lang_Chain/out/_runs/<run-id>.jsonl           … 計測ログ
-/opt/Lang_Chain/out/_commented/user_api/pkg/handler/user.go … コメント追記済みのGoファイル（コメント追記を有効にした場合）
+/opt/Lang_Chain/out/_commented/user_api/pkg/handler/user.go … コメント追記済みのファイル（コメント追記を有効にした場合）
 ```
 
 > **注意：`--repo` に `xx_api` 自体を指定する場合**

@@ -1,11 +1,12 @@
-"""バッチドライバー: Goファイル×タスクごとに独立したthread_idでdoc_graphを実行する（方式A）。
+"""バッチドライバー: ソースファイル×タスクごとに独立したthread_idでdoc_graphを実行する（方式A）。
 
 タスクは設計書の生成(doc)とコメント追記(comment)。既定では、スキルが設定されているタスクをすべて実行する。
+対象の言語・フォルダ・ファイルは targets.toml（なければ targets.example.toml）で決まる。
 
 使い方:
-    python -m godoc_agent.runner --repo /path/to/go-repo --out ./out --limit 5
-    python -m godoc_agent.runner --repo /path/to/go-repo --out ./out --run-id 20261102-2100  # 中断した実行を再開
-    python -m godoc_agent.runner --repo /path/to/go-repo --out ./out --tasks comment         # コメント追記だけ
+    python -m godoc_agent.runner --repo /path/to/repo --out ./out --limit 5
+    python -m godoc_agent.runner --repo /path/to/repo --out ./out --run-id 20261102-2100  # 中断した実行を再開
+    python -m godoc_agent.runner --repo /path/to/repo --out ./out --tasks comment         # コメント追記だけ
 """
 
 import argparse
@@ -25,9 +26,10 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from .claude_code import build_claude_code
 from .config import Settings, load_settings
 from .doc_graph import build_doc_graph
-from .go_source import discover_go_files, sha256_text
+from .source_common import sha256_text
 from .preflight import preflight
 from .prompts import load_skill
+from .targets import discover_source_files
 from .tasks import COMMENT, DOC, TASK_NAMES, Task, comment_task, design_doc_task
 
 
@@ -86,7 +88,8 @@ class TaskRun:
 
 
 async def process_file(
-    run: TaskRun, sem: asyncio.Semaphore, run_id: str, rel_path: str, source: str, source_hash: str, out_dir: Path
+    run: TaskRun, sem: asyncio.Semaphore, run_id: str, rel_path: str, language: str, source: str, source_hash: str,
+    out_dir: Path,
 ) -> FileResult:
     task = run.task
     thread_id = thread_id_for(run_id, task.name, rel_path)
@@ -108,7 +111,7 @@ async def process_file(
                     else None
                 )
                 state = await run.graph.ainvoke(
-                    {"rel_path": rel_path, "source": source, "previous_output": previous_output}, config
+                    {"rel_path": rel_path, "language": language, "source": source, "previous_output": previous_output}, config
                 )
         except Exception as e:  # 1件の失敗でバッチ全体を止めず、記録して次へ進む
             return FileResult(
@@ -210,21 +213,23 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
     llms = {task.name: build_claude_code(settings, repo, skill_dir) for task, skill_dir in tasks}
     manifests = {task.name: Manifest(task.manifest_path(out_dir)) for task, _ in tasks}
 
-    targets: list[tuple[Task, str, str, str]] = []
+    targets: list[tuple[Task, str, str, str, str]] = []
     skipped = 0
-    for path in discover_go_files(repo):
-        rel_path = path.relative_to(repo).as_posix()
-        source = path.read_text(encoding="utf-8")
+    for file in discover_source_files(repo, settings.targets):
+        rel_path = file.path.relative_to(repo).as_posix()
+        source = file.path.read_text(encoding="utf-8")
         source_hash = sha256_text(source)
         for task, _ in tasks:
             if not args.force and manifests[task.name].is_up_to_date(rel_path, source_hash, task.output_path(out_dir, rel_path)):
                 skipped += 1
                 continue
-            targets.append((task, rel_path, source, source_hash))
+            targets.append((task, rel_path, file.language, source, source_hash))
     if args.limit:
         targets = targets[: args.limit]
 
     task_names = ",".join(task.name for task, _ in tasks)
+    languages = ",".join(lang.name for lang in settings.targets.languages)
+    print(f"対象の設定={settings.targets.source} 言語={languages}", flush=True)
     print(f"run_id={args.run_id} タスク={task_names} 対象={len(targets)} 件（変更なしでスキップ={skipped} 件）", flush=True)
     if not targets:
         return 0
@@ -246,8 +251,8 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
             for task, _ in tasks
         }
         jobs = [
-            asyncio.create_task(process_file(runs[task.name], sem, args.run_id, rel_path, source, source_hash, out_dir))
-            for task, rel_path, source, source_hash in targets
+            asyncio.create_task(process_file(runs[task.name], sem, args.run_id, rel_path, language, source, source_hash, out_dir))
+            for task, rel_path, language, source, source_hash in targets
         ]
         with metrics_path.open("a", encoding="utf-8") as metrics_file:
             for i, finished in enumerate(asyncio.as_completed(jobs), start=1):
@@ -284,9 +289,9 @@ def _task_list(value: str) -> list[str]:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Goソースから詳細設計書の生成・コメント追記を一括で行う")
-    p.add_argument("--repo", type=Path, required=True, help="Goリポジトリのルート")
-    p.add_argument("--out", type=Path, required=True, help="設計書の出力先（コメント追記済みのGoファイルは <out>/_commented/ 配下）")
+    p = argparse.ArgumentParser(description="ソースファイルから詳細設計書の生成・コメント追記を一括で行う")
+    p.add_argument("--repo", type=Path, required=True, help="対象リポジトリのルート")
+    p.add_argument("--out", type=Path, required=True, help="設計書の出力先（コメント追記済みのファイルは <out>/_commented/ 配下）")
     p.add_argument("--run-id", default=datetime.now().strftime("%Y%m%d-%H%M%S"), help="同じ値を指定すると中断した実行を再開")
     p.add_argument(
         "--tasks", type=_task_list, default=None,

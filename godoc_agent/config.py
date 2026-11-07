@@ -1,8 +1,10 @@
-"""環境変数から設定を読み込む。値の検証はここで行い、起動時に失敗させる。"""
+"""環境変数と対象の設定ファイルから設定を読み込む。値の検証はここで行い、起動時に失敗させる。"""
 
 import os
 from dataclasses import dataclass
 from pathlib import Path
+
+from .targets import TargetConfig, load_targets
 
 
 def _int_env(name: str, default: int, minimum: int = 1) -> int:
@@ -27,6 +29,19 @@ def _ratio_env(name: str, default: float) -> float:
     return value
 
 
+# 設計書スキルはすべての言語で共通。置き場所を固定し、.env での指定を不要にする
+DESIGN_SKILL_NAME = "design-doc-batch"
+
+
+def targets_config_path(base_dir: Path) -> Path:
+    """対象の設定ファイル。TARGETS_CONFIG > targets.toml > targets.example.toml の順に使う。"""
+    if raw := os.getenv("TARGETS_CONFIG"):
+        return Path(raw)
+    local = base_dir / "targets.toml"
+    # 設定をコピーしていない環境でも、例の設定（従来と同じ Go の対象）のまま動くようにする
+    return local if local.is_file() else base_dir / "targets.example.toml"
+
+
 @dataclass(frozen=True)
 class Settings:
     ollama_base_url: str
@@ -38,10 +53,11 @@ class Settings:
     max_attempts: int
     checkpoint_db: Path
     claude_bin: str
-    claude_skill_path: Path | None
+    claude_skill_path: Path
     claude_comment_skill_path: Path | None
     claude_max_turns: int
     claude_timeout_s: int
+    targets: TargetConfig
 
     @property
     def max_source_chars(self) -> int:
@@ -74,9 +90,12 @@ def load_settings() -> Settings:
         max_attempts=_int_env("DOC_MAX_ATTEMPTS", 3),
         checkpoint_db=Path(os.getenv("CHECKPOINT_DB", base_dir / "state" / "checkpoints.sqlite")),
         claude_bin=os.getenv("CLAUDE_BIN", "claude"),
-        claude_skill_path=Path(skill) if (skill := os.getenv("CLAUDE_SKILL_PATH")) else None,
+        claude_skill_path=Path(
+            os.getenv("CLAUDE_SKILL_PATH") or base_dir / "skills" / DESIGN_SKILL_NAME / "SKILL.md"
+        ),
         claude_comment_skill_path=Path(skill) if (skill := os.getenv("CLAUDE_COMMENT_SKILL_PATH")) else None,
         claude_max_turns=_int_env("CLAUDE_MAX_TURNS", 30),
         # エージェントはファイルを読みながら複数回LLMを呼ぶため、長めに取る
         claude_timeout_s=_int_env("CLAUDE_TIMEOUT_S", 1800),
+        targets=load_targets(targets_config_path(base_dir)),
     )
