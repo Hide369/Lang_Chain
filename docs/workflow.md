@@ -18,12 +18,12 @@ flowchart TD
     sum --> exit01([終了コード 0 全件成功 / 1 一部失敗])
 ```
 
-処理の単位は **Goファイル1本 × タスク1つ**（方式A）。タスクは次の2種類で、流れは共通、中身（プロンプト・検証・出力先）だけが異なる（[tasks.py](../godoc_agent/tasks.py)）。
+処理の単位は **ソースファイル1本 × タスク1つ**（方式A）。タスクは次の2種類で、流れは共通、中身（プロンプト・検証・出力先）だけが異なる（[tasks.py](../godoc_agent/tasks.py)）。
 
 | タスク | 内容 | 出力先 | 前回の出力の引き継ぎ |
 |---|---|---|---|
 | `doc` | 詳細設計書（Markdown）の生成 | `<out>/<相対パス>.go.md` | する（履歴を残して改訂） |
-| `comment` | Goファイルへのコメント追記 | `<out>/_commented/<相対パス>.go` | しない（毎回元のソースから） |
+| `comment` | ソースファイルへのコメント追記 | `<out>/_commented/<相対パス>` | しない（毎回元のソースから） |
 
 ## 1. 初期化
 
@@ -41,7 +41,9 @@ flowchart TD
 
 ## 2. 対象ファイルの列挙
 
-[go_source.py](../godoc_agent/go_source.py) の `discover_go_files()` で `--repo` 配下の `.go` を集め、次の条件で絞り込む。
+[targets.py](../godoc_agent/targets.py) の `discover_source_files()` で、対象の設定ファイル（`targets.toml`、なければ `targets.example.toml`）に書かれた言語ごとに、その拡張子のファイルを `--repo` 配下から集めて絞り込む。ファイルの言語は拡張子で決まり、解析（公開識別子の抽出）とプロンプトの言語名に使われる。
+
+既定（`targets.example.toml`）の条件は次のとおり。
 
 | 条件 | 例 |
 |---|---|
@@ -49,13 +51,13 @@ flowchart TD
 | `vendor/`・`testdata/`・`node_modules/`・`.` で始まるディレクトリ配下は除外 | 除外：`user_api/pkg/handler/vendor/x.go` |
 | `_test.go` は除外 | 除外：`user_api/pkg/handler/user_test.go` |
 
-対象・除外の条件を変える手順は [target_files.md](target_files.md) を参照。
+言語・対象・除外の変え方は [target_files.md](target_files.md) を参照。
 
 各ファイルについて、ソースの SHA-256 を計算し、タスクごとに次を判定する。
 
 ```mermaid
 flowchart LR
-    f[Goファイル × タスク] --> force{--force?}
+    f[ソースファイル × タスク] --> force{--force?}
     force -->|あり| target[処理対象]
     force -->|なし| m{manifest のハッシュが一致<br/>かつ出力ファイルが存在?}
     m -->|はい| skip[スキップ]
@@ -251,7 +253,7 @@ sequenceDiagram
 |---|---|
 | `<out>/<相対パス>.go.md` | 詳細設計書 |
 | `<out>/.manifest.json` | 設計書の差分スキップ用ハッシュ |
-| `<out>/_commented/<相対パス>.go` | コメント追記済みのGoファイル（Goリポジトリは書き換えない） |
+| `<out>/_commented/<相対パス>` | コメント追記済みのファイル（対象リポジトリは書き換えない） |
 | `<out>/_commented/.manifest.json` | コメント追記の差分スキップ用ハッシュ |
 | `<out>/_runs/<run_id>.jsonl` | 計測ログ（1ファイル×タスク = 1行） |
 | `<out>/_runs/<run_id>.log` | 標準出力のログ（tmux / nohup / nightly.sh で起動した場合） |
