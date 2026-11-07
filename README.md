@@ -49,6 +49,7 @@ generate の中身（ファイルごと）:
 | [godoc_agent/preflight.py](godoc_agent/preflight.py) | 開始前の Ollama 接続・モデル存在チェック |
 
 起動から終了までの処理の流れ（再開判定・検証・保存・終了コードなど）は [docs/workflow.md](docs/workflow.md) にまとめている。
+処理対象のフォルダや除外条件を変える手順は [docs/target_files.md](docs/target_files.md) にまとめている。
 
 ## サーバー(GB10)へのセットアップ
 

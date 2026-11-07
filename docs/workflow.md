@@ -49,6 +49,8 @@ flowchart TD
 | `vendor/`・`testdata/`・`node_modules/`・`.` で始まるディレクトリ配下は除外 | 除外：`user_api/pkg/handler/vendor/x.go` |
 | `_test.go` は除外 | 除外：`user_api/pkg/handler/user_test.go` |
 
+対象・除外の条件を変える手順は [target_files.md](target_files.md) を参照。
+
 各ファイルについて、ソースの SHA-256 を計算し、タスクごとに次を判定する。
 
 ```mermaid
