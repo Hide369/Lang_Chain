@@ -79,26 +79,21 @@ NG なら終了コード `2`。
 ## 4. 並列実行
 
 - 処理対象ごとに非同期ジョブを作り、セマフォで同時実行数を `LLM_CONCURRENCY` に抑える（**タスクをまたいだ合計**。Ollama の `OLLAMA_NUM_PARALLEL` に合わせる）
-- グラフの状態は SQLite（`CHECKPOINT_DB`、既定 `state/checkpoints.sqlite`）にチェックポイントとして保存される
+- グラフの状態はチェックポイントとして保存しない。1ファイル×1タスクごとに毎回まっさらな状態から実行する
 - 1件の例外でバッチ全体は止めず、その件を `error` として記録して次へ進む
 
-### 4-1. 再開の判定（`process_file()`）
-
-`thread_id = <run_id>:<タスク>:<相対パスのSHA-1先頭12桁>` でチェックポイントを引き、次のどれかを行う。
+### 4-1. 1件の実行（`process_file()`）
 
 ```mermaid
 flowchart TD
-    s[チェックポイントを取得] --> n{途中のノードがある?}
-    n -->|はい| resume[中断した所から再開]
-    n -->|いいえ| d{status = done?}
-    d -->|はい| reuse[保存済みの結果を使う<br/>出力の書き出しだけ行う]
-    d -->|いいえ| fresh[新規に実行]
-    fresh --> prev{doc タスクで<br/>前回の出力がある?}
+    s[処理対象] --> prev{doc タスクで<br/>前回の出力がある?}
     prev -->|はい| withprev[前回の設計書を添えて実行]
     prev -->|いいえ| noprev[初版として実行]
 ```
 
-同じ `--run-id` で再実行すると、完了済みは再利用、中断・失敗分だけが処理される。
+中断・失敗した実行の途中から再開する仕組みは持たない。再実行すると、完了済みのファイルは manifest（2章）でスキップされ、
+中断・失敗したファイルだけが最初からやり直される。前回の会話（Claude Code のセッション）を引き継がないため、
+膨らんだコンテキストのまま再開してコンテキスト超過を繰り返すことがない。
 
 ### 4-2. 1ファイル×1タスクのグラフ（`doc_graph.py`）
 
@@ -257,4 +252,3 @@ sequenceDiagram
 | `<out>/_commented/.manifest.json` | コメント追記の差分スキップ用ハッシュ |
 | `<out>/_runs/<run_id>.jsonl` | 計測ログ（1ファイル×タスク = 1行） |
 | `<out>/_runs/<run_id>.log` | 標準出力のログ（tmux / nohup / nightly.sh で起動した場合） |
-| `state/checkpoints.sqlite` | LangGraph のチェックポイント（再開用） |

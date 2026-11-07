@@ -4,7 +4,6 @@ from pathlib import Path
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
-from langgraph.checkpoint.memory import InMemorySaver
 
 from conftest import SAMPLE_GO, ScriptedLLM, good_doc, reply
 from godoc_agent.doc_graph import build_doc_graph
@@ -23,12 +22,11 @@ def compile_graph(llm, *, max_attempts=3, max_source_chars=100_000, task=None):
         design_doc_task("スキル", Path("skills"), date(2026, 11, 3), max_input_chars=max_source_chars),
         initial_messages=initial_messages,
     )
-    return build_doc_graph(llm, task, max_attempts=max_attempts).compile(checkpointer=InMemorySaver())
+    return build_doc_graph(llm, task, max_attempts=max_attempts).compile()
 
 
-async def run(graph, thread_id="t1", source=SAMPLE_GO, previous_doc=None):
-    config = {"configurable": {"thread_id": thread_id}}
-    return await graph.ainvoke({"rel_path": "user/service.go", "language": "go", "source": source, "previous_output": previous_doc}, config)
+async def run(graph, source=SAMPLE_GO, previous_doc=None):
+    return await graph.ainvoke({"rel_path": "user/service.go", "language": "go", "source": source, "previous_output": previous_doc})
 
 
 async def test_valid_draft_finishes_in_one_attempt():
@@ -136,29 +134,29 @@ async def test_previous_doc_counts_toward_size_limit():
     assert llm.calls == []
 
 
-async def test_each_thread_starts_with_fresh_context():
+async def test_each_invocation_starts_with_fresh_context():
     llm = ScriptedLLM([reply(good_doc(*ALL_EXPORTED)), reply(good_doc(*ALL_EXPORTED))])
     graph = compile_graph(llm)
 
-    await run(graph, thread_id="file-a")
-    await run(graph, thread_id="file-b")
+    await run(graph)
+    await run(graph)
 
-    # 2本目のファイルに送られるのは最初のメッセージだけで、1本目の履歴は含まれない
+    # 同じグラフでも2回目に送られるのは最初のメッセージだけで、1回目の履歴は含まれない
     assert len(llm.calls[1]) == 1
 
 
-async def test_session_resumes_from_checkpoint_after_failure():
+async def test_invocation_after_failure_starts_over():
     llm = ScriptedLLM([RuntimeError("claude crashed"), reply(good_doc(*ALL_EXPORTED))])
     graph = compile_graph(llm)
-    config = {"configurable": {"thread_id": "resume"}}
 
     with pytest.raises(RuntimeError):
-        await graph.ainvoke({"rel_path": "user/service.go", "language": "go", "source": SAMPLE_GO}, config)
-    assert (await graph.aget_state(config)).next == ("generate",)
+        await run(graph)
+    state = await run(graph)
 
-    state = await graph.ainvoke(None, config)
-
+    # 失敗した実行の続きではなく、最初のメッセージからやり直す
     assert state["status"] == "done"
+    assert state["attempts"] == 1
+    assert len(llm.calls[1]) == 1
 
 
 def test_find_doc_issues_uses_word_boundaries():

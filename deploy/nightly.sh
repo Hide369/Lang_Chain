@@ -7,7 +7,7 @@ set -euo pipefail
 : "${GODOC_REPO:?環境変数 GODOC_REPO にGoリポジトリのパスを指定してください}"
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${GODOC_OUT:-$APP_DIR/out}"
-# 日付単位のrun_id。同じ日に再実行すると、中断・失敗したファイルの続きから再開する
+# 日付単位のrun_id（ログのファイル名）。同じ日に再実行すると、完了済みを飛ばして中断・失敗したファイルを最初から処理する
 RUN_ID="nightly-$(date +%Y%m%d)"
 
 mkdir -p "$OUT_DIR/_runs"

@@ -63,7 +63,7 @@ ssh gb10 "cd /opt/Lang_Chain && cp -n targets.example.toml targets.toml"
 |---|---|
 | `.env` のほかの設定 | 設定項目は変わっていない |
 | `out/`（設計書・manifest） | 出力先と差分スキップの記録の形式は変わっていない |
-| `state/`（チェックポイント） | 同じ形式のまま使える |
+| `state/`（チェックポイント） | 現在の版では使っていない（削除してよい） |
 | `deploy/`（nightly.sh・systemd） | スキルのパスや対象を参照していない |
 
 ## 5. 入れ替え後の確認

@@ -1,17 +1,16 @@
-"""バッチドライバー: ソースファイル×タスクごとに独立したthread_idでdoc_graphを実行する（方式A）。
+"""バッチドライバー: ソースファイル×タスクごとに、毎回まっさらな状態でdoc_graphを実行する（方式A）。
 
 タスクは設計書の生成(doc)とコメント追記(comment)。既定では、スキルが設定されているタスクをすべて実行する。
 対象の言語・フォルダ・ファイルは targets.toml（なければ targets.example.toml）で決まる。
 
 使い方:
     python -m godoc_agent.runner --repo /path/to/repo --out ./out --limit 5
-    python -m godoc_agent.runner --repo /path/to/repo --out ./out --run-id 20261102-2100  # 中断した実行を再開
+    python -m godoc_agent.runner --repo /path/to/repo --out ./out  # 再実行: 生成済み・変更なしのファイルは飛ばす
     python -m godoc_agent.runner --repo /path/to/repo --out ./out --tasks comment         # コメント追記だけ
 """
 
 import argparse
 import asyncio
-import hashlib
 import json
 import sys
 import time
@@ -21,7 +20,6 @@ from datetime import date, datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from .claude_code import build_claude_code
 from .config import Settings, load_settings
@@ -38,7 +36,6 @@ class FileResult:
     task: str
     rel_path: str
     source_hash: str
-    thread_id: str
     status: str
     duration_s: float
     attempts: int = 0
@@ -52,11 +49,6 @@ class FileResult:
     def to_log(self) -> dict:
         # 生成物の本文は出力ファイルにあるので、計測ログには含めない
         return {k: v for k, v in asdict(self).items() if k != "draft"}
-
-
-def thread_id_for(run_id: str, task: str, rel_path: str) -> str:
-    # パスから決まる値にすることで、同じrun_idで再実行したとき同じセッションを再開できる
-    return f"{run_id}:{task}:{hashlib.sha1(rel_path.encode('utf-8')).hexdigest()[:12]}"
 
 
 class Manifest:
@@ -88,34 +80,29 @@ class TaskRun:
 
 
 async def process_file(
-    run: TaskRun, sem: asyncio.Semaphore, run_id: str, rel_path: str, language: str, source: str, source_hash: str,
-    out_dir: Path,
+    run: TaskRun, sem: asyncio.Semaphore, rel_path: str, language: str, source: str, source_hash: str, out_dir: Path,
 ) -> FileResult:
     task = run.task
-    thread_id = thread_id_for(run_id, task.name, rel_path)
-    config = {"configurable": {"thread_id": thread_id}, "run_name": f"{task.run_name}:{rel_path}"}
+    config = {"run_name": f"{task.run_name}:{rel_path}"}
     async with sem:
         started = time.perf_counter()  # 待ち時間を含めず、処理時間だけを計測する
         try:
-            snapshot = await run.graph.aget_state(config)
-            if snapshot.next:
-                state = await run.graph.ainvoke(None, config)  # 中断したセッションを途中から再開
-            elif snapshot.values.get("status") == "done":
-                state = snapshot.values  # このrun_idで生成済み（出力の書き出しだけ行う）
-            else:
-                # 既存の設計書があれば渡し、履歴（バージョン）を引き継いで改訂させる
-                previous_path = task.output_path(out_dir, rel_path)
-                previous_output = (
-                    previous_path.read_text(encoding="utf-8")
-                    if task.uses_previous_output and previous_path.is_file()
-                    else None
-                )
-                state = await run.graph.ainvoke(
-                    {"rel_path": rel_path, "language": language, "source": source, "previous_output": previous_output}, config
-                )
+            # 既存の設計書があれば渡し、履歴（バージョン）を引き継いで改訂させる
+            previous_path = task.output_path(out_dir, rel_path)
+            previous_output = (
+                previous_path.read_text(encoding="utf-8")
+                if task.uses_previous_output and previous_path.is_file()
+                else None
+            )
+            # チェックポイントは使わず、毎回まっさらな状態から始める。前回の実行で膨らんだ会話
+            # （Claude Code のセッション）を引き継いでコンテキスト超過を繰り返さないため。
+            # 中断しても、完了済みは manifest で飛ばされ、残りは再実行で最初からやり直される
+            state = await run.graph.ainvoke(
+                {"rel_path": rel_path, "language": language, "source": source, "previous_output": previous_output}, config
+            )
         except Exception as e:  # 1件の失敗でバッチ全体を止めず、記録して次へ進む
             return FileResult(
-                task=task.name, rel_path=rel_path, source_hash=source_hash, thread_id=thread_id, status="error",
+                task=task.name, rel_path=rel_path, source_hash=source_hash, status="error",
                 duration_s=time.perf_counter() - started, error=f"{type(e).__name__}: {e}",
             )
 
@@ -123,7 +110,6 @@ async def process_file(
         task=task.name,
         rel_path=rel_path,
         source_hash=source_hash,
-        thread_id=thread_id,
         status=state.get("status", "error"),
         duration_s=time.perf_counter() - started,
         attempts=state.get("attempts", 0),
@@ -203,7 +189,6 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
 
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "_runs").mkdir(exist_ok=True)
-    settings.checkpoint_db.parent.mkdir(parents=True, exist_ok=True)
 
     # エージェントは読み取り系ツールしか使えず日付を調べられないため、ここで渡す。
     # 実行中に日付をまたいでも、同じ実行の出力はすべて同じ日付になるよう一度だけ取得する
@@ -241,39 +226,38 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
     results: list[FileResult] = []
     started = time.perf_counter()
 
-    async with AsyncSqliteSaver.from_conn_string(str(settings.checkpoint_db)) as checkpointer:
-        runs = {
-            task.name: TaskRun(
-                task,
-                build_doc_graph(llms[task.name], task, max_attempts=settings.max_attempts).compile(checkpointer=checkpointer),
-                manifests[task.name],
+    runs = {
+        task.name: TaskRun(
+            task,
+            build_doc_graph(llms[task.name], task, max_attempts=settings.max_attempts).compile(),
+            manifests[task.name],
+        )
+        for task, _ in tasks
+    }
+    jobs = [
+        asyncio.create_task(process_file(runs[task.name], sem, rel_path, language, source, source_hash, out_dir))
+        for task, rel_path, language, source, source_hash in targets
+    ]
+    with metrics_path.open("a", encoding="utf-8") as metrics_file:
+        for i, finished in enumerate(asyncio.as_completed(jobs), start=1):
+            result = await finished
+            result.warnings = context_warnings(result.llm_calls, settings)
+            if result.status == "done" and result.draft:
+                task_run = runs[result.task]
+                out_path = task_run.task.output_path(out_dir, result.rel_path)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(result.draft + "\n", encoding="utf-8")
+                task_run.manifest.record(result.rel_path, result.source_hash)
+            results.append(result)
+            metrics_file.write(json.dumps(result.to_log(), ensure_ascii=False) + "\n")
+            metrics_file.flush()
+            detail = f" ({result.error or '; '.join(result.issues or [])})" if result.status != "done" else ""
+            if result.warnings:
+                detail += f" [警告: {'; '.join(result.warnings)}]"
+            print(
+                f"[{i}/{len(targets)}] {result.status:<17} {result.duration_s:6.0f}s  {result.task:<7} {result.rel_path}{detail}",
+                flush=True,
             )
-            for task, _ in tasks
-        }
-        jobs = [
-            asyncio.create_task(process_file(runs[task.name], sem, args.run_id, rel_path, language, source, source_hash, out_dir))
-            for task, rel_path, language, source, source_hash in targets
-        ]
-        with metrics_path.open("a", encoding="utf-8") as metrics_file:
-            for i, finished in enumerate(asyncio.as_completed(jobs), start=1):
-                result = await finished
-                result.warnings = context_warnings(result.llm_calls, settings)
-                if result.status == "done" and result.draft:
-                    task_run = runs[result.task]
-                    out_path = task_run.task.output_path(out_dir, result.rel_path)
-                    out_path.parent.mkdir(parents=True, exist_ok=True)
-                    out_path.write_text(result.draft + "\n", encoding="utf-8")
-                    task_run.manifest.record(result.rel_path, result.source_hash)
-                results.append(result)
-                metrics_file.write(json.dumps(result.to_log(), ensure_ascii=False) + "\n")
-                metrics_file.flush()
-                detail = f" ({result.error or '; '.join(result.issues or [])})" if result.status != "done" else ""
-                if result.warnings:
-                    detail += f" [警告: {'; '.join(result.warnings)}]"
-                print(
-                    f"[{i}/{len(targets)}] {result.status:<17} {result.duration_s:6.0f}s  {result.task:<7} {result.rel_path}{detail}",
-                    flush=True,
-                )
 
     print(summarize(results, time.perf_counter() - started), flush=True)
     print(f"計測ログ: {metrics_path}", flush=True)
@@ -292,7 +276,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="ソースファイルから詳細設計書の生成・コメント追記を一括で行う")
     p.add_argument("--repo", type=Path, required=True, help="対象リポジトリのルート")
     p.add_argument("--out", type=Path, required=True, help="設計書の出力先（コメント追記済みのファイルは <out>/_commented/ 配下）")
-    p.add_argument("--run-id", default=datetime.now().strftime("%Y%m%d-%H%M%S"), help="同じ値を指定すると中断した実行を再開")
+    p.add_argument("--run-id", default=datetime.now().strftime("%Y%m%d-%H%M%S"), help="計測ログ（<out>/_runs/<run_id>.jsonl）の名前。同じ値なら同じファイルに追記する")
     p.add_argument(
         "--tasks", type=_task_list, default=None,
         help="実行するタスク（doc,comment）。省略時は doc と、CLAUDE_COMMENT_SKILL_PATH が設定されていれば comment",

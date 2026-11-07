@@ -39,7 +39,6 @@ def skill_file(tmp_path: Path) -> Path:
 def env(monkeypatch, tmp_path: Path, skill_file: Path):
     monkeypatch.setenv("CLAUDE_SKILL_PATH", str(skill_file))
     monkeypatch.delenv("CLAUDE_COMMENT_SKILL_PATH", raising=False)
-    monkeypatch.setenv("CHECKPOINT_DB", str(tmp_path / "state" / "cp.sqlite"))
     monkeypatch.setenv("LLM_CONCURRENCY", "1")  # 応答の順序を決定的にする
     # 手元に targets.toml があっても結果が変わらないよう、例の設定（Go の handler 配下）に固定する
     monkeypatch.setenv("TARGETS_CONFIG", str(Path(runner.__file__).resolve().parent.parent / "targets.example.toml"))
@@ -103,16 +102,19 @@ async def test_one_failing_file_does_not_stop_the_batch(env, monkeypatch, repo, 
     assert not (out / f"{HEALTH}.md").exists()
 
 
-async def test_rerun_with_same_run_id_resumes_failed_session(env, monkeypatch, repo, tmp_path):
+async def test_rerun_regenerates_only_failed_file_from_scratch(env, monkeypatch, repo, tmp_path):
     out = tmp_path / "out"
-    use_llm(monkeypatch, ScriptedLLM([RuntimeError("claude crashed"), reply(good_doc("GetUser"))]))
+    # health.go は1回目の草稿が検証NG（再生成のため履歴が積まれる）の後に落ちる
+    use_llm(monkeypatch, ScriptedLLM([reply("識別子の記載なし"), RuntimeError("claude crashed"), reply(good_doc("GetUser"))]))
     assert await run_batch(repo, out) == 1
 
-    # 同じrun_idで再実行すると、失敗したhealth.goだけがチェックポイントから再開される
+    # 再実行では完了済みの user.go は manifest で飛ばされ、health.go だけが最初から生成される
     llm = ScriptedLLM([reply(good_doc("Health"))])
     use_llm(monkeypatch, llm)
     assert await run_batch(repo, out) == 0
     assert len(llm.calls) == 1
+    # 前回の会話（草稿・フィードバック）は引き継がず、最初のメッセージ（システム＋依頼）だけを送る
+    assert [type(m).__name__ for m in llm.calls[0]] == ["SystemMessage", "HumanMessage"]
     assert (out / f"{HEALTH}.md").is_file()
 
 
@@ -258,13 +260,6 @@ exclude = ["**/*.test.ts"]
     assert "TypeScriptの詳細設計書" in system.content
     assert "TypeScriptファイル" in human.content and ts in human.content
     assert "Goの詳細設計書" in llm.calls[0][0].content
-
-
-def test_thread_id_is_stable_per_run_task_and_path():
-    assert runner.thread_id_for("r1", "doc", "a.go") == runner.thread_id_for("r1", "doc", "a.go")
-    assert runner.thread_id_for("r1", "doc", "a.go") != runner.thread_id_for("r1", "doc", "b.go")
-    assert runner.thread_id_for("r1", "doc", "a.go") != runner.thread_id_for("r2", "doc", "a.go")
-    assert runner.thread_id_for("r1", "doc", "a.go") != runner.thread_id_for("r1", "comment", "a.go")
 
 
 @pytest.fixture
