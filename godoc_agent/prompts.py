@@ -60,11 +60,22 @@ def build_agent_messages(
     return [SystemMessage(content=system), HumanMessage(content=human)]
 
 
-def build_doc_feedback(issues: list[str]) -> HumanMessage:
-    bullet = "\n".join(f"- {i}" for i in issues)
-    return HumanMessage(
-        content=f"直前の設計書には次の問題があります。修正した設計書の全文を出力し直してください。\n{bullet}"
-    )
+# 再生成は新しいセッションで行う（会話を続けない）ため、直前の出力そのものを依頼文に添えて渡す
+RETRY_SECTION = """## 直前の試行で見つかった問題（再生成）
+直前に生成した{target}には次の問題がありました。<previous_attempt> をもとに問題を修正し、{target}の全文を出力し直してください。
+{issues}
+
+<previous_attempt>
+{draft}
+</previous_attempt>"""
+
+
+def _retry_section(target: str, draft: str, issues: list[str]) -> str:
+    return RETRY_SECTION.format(target=target, issues="\n".join(f"- {i}" for i in issues), draft=draft)
+
+
+def build_doc_feedback(draft: str, issues: list[str]) -> str:
+    return _retry_section("設計書", draft, issues)
 
 
 COMMENT_SYSTEM_PROMPT = """あなたは{language}ファイルへのコメント追記を一括で行うバッチ処理の一部として、非対話で動作しています。
@@ -103,8 +114,5 @@ def build_comment_messages(
     return [SystemMessage(content=system), HumanMessage(content=human)]
 
 
-def build_comment_feedback(issues: list[str]) -> HumanMessage:
-    bullet = "\n".join(f"- {i}" for i in issues)
-    return HumanMessage(
-        content=f"直前の出力には次の問題があります。修正したファイルの全文を出力し直してください。\n{bullet}"
-    )
+def build_comment_feedback(draft: str, issues: list[str]) -> str:
+    return _retry_section("ファイル", draft, issues)

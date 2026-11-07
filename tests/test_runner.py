@@ -122,7 +122,7 @@ def option(argv: list[str], name: str) -> str:
     return argv[argv.index(name) + 1]
 
 
-async def test_runs_claude_code_in_repo_and_retries_in_same_session(env, monkeypatch, repo, tmp_path, fake_claude):
+async def test_runs_claude_code_in_repo_and_retries_in_new_session(env, monkeypatch, repo, tmp_path, fake_claude):
     monkeypatch.setenv("CLAUDE_BIN", fake_claude.bin)
     fake_claude.respond(
         claude_result(good_doc("Health"), session_id="s-health"),
@@ -140,8 +140,11 @@ async def test_runs_claude_code_in_repo_and_retries_in_same_session(env, monkeyp
     assert all(os.path.samefile(c["cwd"], repo) for c in calls)
     assert "# 詳細設計書スキル" in option(calls[0]["argv"], "--append-system-prompt")
     assert USER in calls[1]["argv"][1]
-    # 検証NGの再生成は、同じセッションを --resume して指摘だけを送る
-    assert option(calls[2]["argv"], "--resume") == "s-user"
+    # 検証NGの再生成は --resume せず、新しいセッションに元の依頼・直前の出力・指摘をまとめて送る
+    retry_argv = calls[2]["argv"]
+    assert "--resume" not in retry_argv
+    assert "# 詳細設計書スキル" in option(retry_argv, "--append-system-prompt")
+    assert USER in retry_argv[1] and "識別子の記載なし" in retry_argv[1] and "GetUser" in retry_argv[1]
 
 
 def read_logs(out: Path) -> dict[str, dict]:

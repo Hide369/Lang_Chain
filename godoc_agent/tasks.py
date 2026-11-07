@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-from langchain_core.messages import AnyMessage, HumanMessage
+from langchain_core.messages import AnyMessage
 
 from .source_common import SourceFacts, first_code_difference
 from .prompts import build_agent_messages, build_comment_feedback, build_comment_messages, build_doc_feedback
@@ -31,7 +31,8 @@ class Task:
     run_name: str  # LangSmith の実行名の接頭辞
     initial_messages: InitialMessages
     find_issues: FindIssues
-    build_feedback: Callable[[list[str]], HumanMessage]
+    # (直前の出力, 問題点) -> 再生成の依頼文に追記する節
+    build_feedback: Callable[[str, list[str]], str]
     max_input_chars: int
     out_subdir: str  # --out からの相対フォルダ（"" は --out 直下）
     out_suffix: str  # 出力ファイル名 = ソースファイル名 + out_suffix

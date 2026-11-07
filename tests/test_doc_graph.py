@@ -82,19 +82,35 @@ async def test_structure_is_left_to_the_skill():
     assert state["status"] == "done"
 
 
-async def test_missing_identifiers_are_retried_with_feedback_in_same_session():
-    llm = ScriptedLLM([reply(good_doc("User"), session_id="s1"), reply(good_doc(*ALL_EXPORTED), session_id="s1")])
+async def test_missing_identifiers_are_retried_in_new_session_with_previous_draft():
+    first = good_doc("User") + "初版の本文"
+    llm = ScriptedLLM([reply(first), reply(good_doc(*ALL_EXPORTED))])
 
     state = await run(compile_graph(llm))
 
     assert state["status"] == "done"
     assert state["attempts"] == 2
-    retry_messages = llm.calls[1]
-    assert isinstance(retry_messages[-2], AIMessage)
-    # ClaudeCodeLLM はこのセッションIDで --resume する
-    assert retry_messages[-2].response_metadata["session_id"] == "s1"
-    assert isinstance(retry_messages[-1], HumanMessage)
-    assert "GetUser" in retry_messages[-1].content
+    initial, retry = llm.calls
+    # 会話を続けない（AIMessage を積まない）ので、ClaudeCodeLLM は --resume せず新しいセッションで起動する
+    assert not any(isinstance(m, AIMessage) for m in retry)
+    assert len(retry) == len(initial)
+    # 最初の依頼文に、直前の出力と問題点を追記して送り直す
+    assert retry[-1].content.startswith(initial[-1].content)
+    assert "初版の本文" in retry[-1].content
+    assert "GetUser" in retry[-1].content.removeprefix(initial[-1].content)
+
+
+async def test_retry_prompt_does_not_grow_with_each_attempt():
+    llm = ScriptedLLM([reply("1回目の草稿"), reply("2回目の草稿"), reply(good_doc(*ALL_EXPORTED))])
+
+    state = await run(compile_graph(llm, max_attempts=3))
+
+    assert state["attempts"] == 3
+    third = llm.calls[2][-1].content
+    # 渡すのは直前の草稿だけで、それより前の試行は持ち越さない
+    assert "2回目の草稿" in third
+    assert "1回目の草稿" not in third
+    assert len(third) == len(llm.calls[1][-1].content)
 
 
 async def test_gives_up_after_max_attempts():

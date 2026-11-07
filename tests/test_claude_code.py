@@ -38,7 +38,6 @@ async def test_first_call_starts_session_with_skill_and_read_only_tools(fake_cla
     reply = await make_llm(fake_claude, tmp_path).ainvoke([SystemMessage("スキル本文"), HumanMessage("作成して")])
 
     assert reply.content == "# 設計書"
-    assert reply.response_metadata["session_id"] == "s1"
     assert reply.response_metadata["num_turns"] == 3
     call = fake_claude.calls()[0]
     argv = call["argv"]
@@ -56,8 +55,8 @@ async def test_first_call_starts_session_with_skill_and_read_only_tools(fake_cla
     assert call["nonessential_traffic"] == "1"
 
 
-async def test_retry_resumes_previous_session_with_feedback_only(fake_claude, tmp_path):
-    fake_claude.respond(claude_result("# 修正版", session_id="s1"))
+async def test_conversation_continuation_is_rejected_without_starting_claude(fake_claude, tmp_path):
+    # 毎回新しいセッションで起動するため、過去の応答を黙って捨てずにエラーにする
     messages = [
         SystemMessage("スキル本文"),
         HumanMessage("作成して"),
@@ -65,13 +64,10 @@ async def test_retry_resumes_previous_session_with_feedback_only(fake_claude, tm
         HumanMessage("見出しが足りません"),
     ]
 
-    reply = await make_llm(fake_claude, tmp_path).ainvoke(messages)
+    with pytest.raises(ValueError, match="AIMessage"):
+        await make_llm(fake_claude, tmp_path).ainvoke(messages)
 
-    assert reply.content == "# 修正版"
-    argv = fake_claude.calls()[0]["argv"]
-    assert argv[:2] == ["-p", "見出しが足りません"]
-    assert option(argv, "--resume") == "s1"
-    assert "--append-system-prompt" not in argv
+    assert fake_claude.calls() == []
 
 
 async def test_input_token_usage_is_recorded(fake_claude, tmp_path):

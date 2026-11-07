@@ -30,7 +30,7 @@ runner は常駐サービスではなく、起動すると対象ファイルを�
 ```
 prepare ──> generate ──> validate ──> done
    │            ▲            │
-   │            └── retry ───┤（本文が空・公開識別子の記載漏れ → 同じセッションを --resume して指摘だけ送る）
+   │            └── retry ───┤（本文が空・公開識別子の記載漏れ → 新しいセッションに元の依頼＋直前の出力＋指摘を送る）
    └─> too_large             └─> failed_validation
 
 generate の中身（ファイルごと）:
@@ -45,7 +45,7 @@ generate の中身（ファイルごと）:
 | [godoc_agent/doc_graph.py](godoc_agent/doc_graph.py) | 1ファイル×1タスク分のグラフ（生成・検証・再試行） |
 | [godoc_agent/tasks.py](godoc_agent/tasks.py) | タスク（設計書・コメント追記）ごとのプロンプト・検証・出力先の定義 |
 | [godoc_agent/runner.py](godoc_agent/runner.py) | バッチ実行、並列数制御、差分スキップ、計測ログ |
-| [godoc_agent/claude_code.py](godoc_agent/claude_code.py) | `claude -p` の起動、Ollama への接続設定、セッションの継続（`--resume`） |
+| [godoc_agent/claude_code.py](godoc_agent/claude_code.py) | `claude -p` の起動（呼び出しごとに新しいセッション）、Ollama への接続設定 |
 | [godoc_agent/prompts.py](godoc_agent/prompts.py) | SKILL.md の読み込みと、エージェントへの指示の組み立て |
 | [godoc_agent/targets.py](godoc_agent/targets.py) | 対象の設定ファイル（targets.toml）の読み込みと、対象ファイルの列挙 |
 | [godoc_agent/analyzers.py](godoc_agent/analyzers.py) | 言語名から解析処理を引く（[go_source.py](godoc_agent/go_source.py)・[csharp_source.py](godoc_agent/csharp_source.py)・[typescript_source.py](godoc_agent/typescript_source.py)：関数・型・公開識別子などの事実抽出。いずれも正規表現の簡易版） |
@@ -425,6 +425,7 @@ sudo systemctl disable --now godoc-nightly.timer    # 定期実行を止める
 
 - **事実抽出は正規表現による簡易版**。複雑な宣言を取りこぼす可能性がある。本番では `go/ast` を使う補助ツールに置き換える
 - **入力の切り捨てを検出できない**。Claude Code はコンテキストの大きさを知らないまま会話を伸ばし、Ollama は `OLLAMA_CONTEXT_LENGTH` を超えた分を黙って切り捨てる。大きすぎるファイルは「1トークン≒3文字」の概算で事前に `too_large` とし、ターン数は `CLAUDE_MAX_TURNS` で抑えている。実行後は入力トークン数が上限に近ければ `warnings` に残すが、切り捨てそのものを検出するわけではなく、`usage` が返らなければ警告も出ない
+- **再生成は新しいセッションで行う**。以前は同じセッションを `--resume` して指摘だけを送っていたが、試行のたびにツールで読んだ内容が積み上がりコンテキストを超えたため、毎回「最初の依頼＋直前の出力＋指摘」を送り直す形にした。代わりに、再生成では関連ファイルを読み直す分の時間がかかり、入力は直前の出力1つ分だけ初回より大きくなる
 - 安定性は、ローカルモデルが Claude Code のツールを正しく使えるかに左右される。同じ操作の繰り返しや途中終了は `error`（`error_max_turns` など）として記録される
 - 設計書の構成（見出し）は検証しない。SKILL.md どおりの構成になっているかは、PoCで出力を確認する
 - コメント追記の検証は、Pythonで書いた簡易な字句解析でコメントと空白を除いて比較している。コードの同一性は保証するが、出力が `gofmt` 済みかどうか・コンパイルできるかは確認しない（取り込む前に `gofmt -l` / `go build` で確認する）

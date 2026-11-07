@@ -2,7 +2,8 @@
 
 モデルは Ollama の Anthropic 互換APIで動かすため、ソースコードはサーバーの外に出ない。
 doc_graph からは `ainvoke(messages) -> AIMessage` を持つチャットモデルとして扱える。
-再生成では直前の応答に残したセッションIDで `--resume` し、エージェントが読んだ内容を引き継ぐ。
+呼び出しのたびに新しいセッションで起動する（`--resume` はしない）。再生成で会話が伸び続けて
+コンテキストを超えるのを防ぐため、再生成に必要な情報（直前の出力と問題点）は doc_graph が依頼文に入れて渡す。
 """
 
 import asyncio
@@ -66,9 +67,10 @@ class ClaudeCodeLLM:
     def _args(self, messages: list[AnyMessage]) -> list[str]:
         if not messages or not isinstance(messages[-1], HumanMessage):
             raise ValueError("最後のメッセージは HumanMessage である必要があります")
+        if any(isinstance(m, AIMessage) for m in messages):
+            # 毎回新しいセッションで起動するため、過去の応答を含む会話の続きは送れない（黙って捨てない）
+            raise ValueError("AIMessage を含む会話の続きには対応していません（再生成の情報は依頼文に含めてください）")
         prompt = messages[-1].content
-        last_reply = next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
-        session_id = last_reply.response_metadata.get("session_id") if last_reply else None
 
         # プロンプトは -p の直後に置く（--add-dir など複数値を取るオプションに吸い込まれないように）
         args = [
@@ -81,12 +83,9 @@ class ClaudeCodeLLM:
         ]
         for d in self.add_dirs:
             args += ["--add-dir", str(d)]
-        if session_id:
-            args += ["--resume", session_id]  # システムプロンプトはセッションに残っている
-        else:
-            system = "\n\n".join(m.content for m in messages if isinstance(m, SystemMessage))
-            if system:
-                args += ["--append-system-prompt", system]
+        system = "\n\n".join(m.content for m in messages if isinstance(m, SystemMessage))
+        if system:
+            args += ["--append-system-prompt", system]
         return args
 
     async def ainvoke(self, messages: list[AnyMessage], config=None, **kwargs) -> AIMessage:
@@ -123,7 +122,6 @@ class ClaudeCodeLLM:
         return AIMessage(
             content=data.get("result") or "",
             response_metadata={
-                "session_id": data.get("session_id"),
                 "num_turns": data.get("num_turns"),
                 "output_tokens": usage.get("output_tokens"),
                 # コンテキストの大きさを見るための入力側。プロンプトキャッシュ分は input_tokens に含まれない

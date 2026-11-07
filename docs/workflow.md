@@ -116,8 +116,8 @@ stateDiagram-v2
 | ノード | 処理 |
 |---|---|
 | `prepare` | 入力サイズ（ソース + 前回の出力の文字数）を上限と比較。超えたら `too_large`。超えなければ静的解析で事実（package・imports・types・functions）を抽出し、最初のメッセージを組み立てる |
-| `generate` | Claude Code を1回実行し、応答から全体を囲む ```` ``` ```` を外して下書きにする。セッションIDと計測値（ターン数・入出力トークン数・所要時間）を残す |
-| `validate` | タスクごとの検証を行い、`done` / 再生成 / `failed_validation` を決める |
+| `generate` | Claude Code を1回実行し、応答から全体を囲む ```` ``` ```` を外して下書きにする。計測値（ターン数・入出力トークン数・所要時間）を残す |
+| `validate` | タスクごとの検証を行い、`done` / 再生成 / `failed_validation` を決める。再生成では、最初の依頼文に直前の出力と指摘を追記したメッセージを作り直す（会話は積み上げない） |
 
 入力サイズの上限（[config.py](../godoc_agent/config.py)）は「1トークン≒3文字」の概算で決める。
 
@@ -144,8 +144,8 @@ stateDiagram-v2
 | 作業ディレクトリ | `--repo`（エージェントは関連ファイルを自分で Read / Grep / Glob する） |
 | ツール | `Read,Glob,Grep` のみ。ファイルの保存は runner が行う |
 | 追加ディレクトリ | SKILL.md のあるフォルダ（`--add-dir`。スキルの参照ファイル用） |
-| システムプロンプト | バッチ用ルール + SKILL.md 全文（初回のみ `--append-system-prompt`） |
-| 再生成 | 直前の応答のセッションIDで `--resume` し、指摘だけを送る（読んだ内容を引き継ぐ） |
+| システムプロンプト | バッチ用ルール + SKILL.md 全文（毎回 `--append-system-prompt`） |
+| 再生成 | `--resume` はせず、新しいセッションで起動する。依頼文は「最初の依頼＋直前の出力（`<previous_attempt>`）＋指摘」。試行を重ねても入力は「初回＋直前の出力1つ分」で頭打ちになり、前の試行でツールが読んだ内容も持ち越さない（関連ファイルは必要なら読み直す） |
 | モデル接続 | `ANTHROPIC_BASE_URL` を Ollama に向け、opus/sonnet/haiku すべてを `LLM_MODEL` にする |
 | 外部通信 | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`、`--strict-mcp-config` で MCP を読まない |
 | 上限 | ターン数 `CLAUDE_MAX_TURNS`、出力トークン `LLM_NUM_PREDICT`、時間 `CLAUDE_TIMEOUT_S`（超過で kill） |
