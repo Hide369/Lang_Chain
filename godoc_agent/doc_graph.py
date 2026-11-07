@@ -1,4 +1,4 @@
-"""Goファイル1本分の出力（設計書・コメント追記済みソース）を生成するグラフ。
+"""ソースファイル1本分の出力（設計書・コメント追記済みソース）を生成するグラフ。
 
 1回の実行 = 1ファイル×1タスク = 1 thread_id。状態にはそのファイルの情報しか入らないため、
 前のファイルのコンテキストが混ざることはない（方式A）。
@@ -16,10 +16,10 @@ from typing import Literal, Protocol, TypedDict
 from langchain_core.messages import AIMessage, AnyMessage
 from langgraph.graph import END, START, StateGraph
 
-from .go_source import extract_facts
+from .analyzers import extract_facts
 from .tasks import Task
 
-# ```markdown / ```go などで全体が囲まれていたら外す
+# ```markdown / ```go / ```csharp などで全体が囲まれていたら外す
 _FENCE_RE = re.compile(r"^```[\w-]*\s*\n(.*)\n```\s*$", re.DOTALL)
 
 Status = Literal["pending", "done", "too_large", "failed_validation"]
@@ -31,6 +31,7 @@ class ChatModel(Protocol):
 
 class DocState(TypedDict, total=False):
     rel_path: str
+    language: str  # 解析に使う言語（analyzers.ANALYZERS のキー）
     source: str
     previous_output: str | None  # 前回の出力（設計書）。履歴を引き継いで改訂するために渡す
     exported: list[str]
@@ -72,7 +73,7 @@ def build_doc_graph(llm: ChatModel, task: Task, *, max_attempts: int) -> StateGr
         total = len(source) + len(previous_output or "")
         if total > task.max_input_chars:
             return {"status": "too_large", "issues": [f"ソースと前回の出力が計 {total} 文字で上限 {task.max_input_chars} を超えています"]}
-        facts = extract_facts(source)
+        facts = extract_facts(state["language"], source)
         return {
             "exported": facts.exported,
             "messages": task.initial_messages(state["rel_path"], source, facts, previous_output),

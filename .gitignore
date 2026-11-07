@@ -2,5 +2,6 @@
 __pycache__/
 .pytest_cache/
 .env
+targets.toml
 state/
 out/

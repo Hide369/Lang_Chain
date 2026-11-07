@@ -29,7 +29,7 @@ def repo(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def skill_file(tmp_path: Path) -> Path:
-    path = tmp_path / "skills" / "go-design-doc" / "SKILL.md"
+    path = tmp_path / "skills" / "design-doc-batch" / "SKILL.md"
     path.parent.mkdir(parents=True)
     path.write_text("# 詳細設計書スキル\n手順...\n", encoding="utf-8")
     return path
@@ -41,6 +41,8 @@ def env(monkeypatch, tmp_path: Path, skill_file: Path):
     monkeypatch.delenv("CLAUDE_COMMENT_SKILL_PATH", raising=False)
     monkeypatch.setenv("CHECKPOINT_DB", str(tmp_path / "state" / "cp.sqlite"))
     monkeypatch.setenv("LLM_CONCURRENCY", "1")  # 応答の順序を決定的にする
+    # 手元に targets.toml があっても結果が変わらないよう、例の設定（Go の handler 配下）に固定する
+    monkeypatch.setenv("TARGETS_CONFIG", str(Path(runner.__file__).resolve().parent.parent / "targets.example.toml"))
 
     async def no_preflight(settings):
         return None
@@ -214,11 +216,48 @@ def test_ctx_warn_ratio_accepts_upper_bound(monkeypatch):
     assert load_settings().ctx_warn_tokens == 8192
 
 
-async def test_requires_skill_path(env, monkeypatch, repo, tmp_path):
-    monkeypatch.delenv("CLAUDE_SKILL_PATH")
+async def test_missing_skill_file_fails_before_scanning(env, monkeypatch, repo, tmp_path):
+    monkeypatch.setenv("CLAUDE_SKILL_PATH", str(tmp_path / "skills" / "none" / "SKILL.md"))
 
-    with pytest.raises(ValueError, match="CLAUDE_SKILL_PATH"):
+    with pytest.raises(FileNotFoundError, match="SKILL.md"):
         await run_batch(repo, tmp_path / "out")
+
+
+async def test_targets_config_selects_languages_and_folders(env, monkeypatch, repo, tmp_path):
+    config = tmp_path / "targets.toml"
+    config.write_text(
+        """
+[[languages]]
+name = "go"
+extensions = [".go"]
+include = ["**/?*_api/pkg/handler/**"]
+
+[[languages]]
+name = "typescript"
+extensions = [".ts"]
+include = ["web/src/**"]
+exclude = ["**/*.test.ts"]
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TARGETS_CONFIG", str(config))
+    ts = "web/src/user.ts"
+    (repo / ts).parent.mkdir(parents=True)
+    (repo / ts).write_text("export function getUser(id: string) { return id }\n", encoding="utf-8")
+    (repo / "web/src/user.test.ts").write_text("export function testIt() {}\n", encoding="utf-8")
+    out = tmp_path / "out"
+    # パス順に Go 2件 → TypeScript 1件。除外した user.test.ts が処理されたら応答が足りずに失敗する
+    llm = ScriptedLLM([reply(good_doc("Health")), reply(good_doc("GetUser")), reply(good_doc("getUser"))])
+    use_llm(monkeypatch, llm)
+
+    assert await run_batch(repo, out) == 0
+
+    assert (out / f"{ts}.md").is_file()
+    system, human = llm.calls[2]
+    # 設計書スキルは共通で、言語名だけがプロンプトで切り替わる
+    assert "TypeScriptの詳細設計書" in system.content
+    assert "TypeScriptファイル" in human.content and ts in human.content
+    assert "Goの詳細設計書" in llm.calls[0][0].content
 
 
 def test_thread_id_is_stable_per_run_task_and_path():

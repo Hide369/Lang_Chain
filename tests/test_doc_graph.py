@@ -28,7 +28,7 @@ def compile_graph(llm, *, max_attempts=3, max_source_chars=100_000, task=None):
 
 async def run(graph, thread_id="t1", source=SAMPLE_GO, previous_doc=None):
     config = {"configurable": {"thread_id": thread_id}}
-    return await graph.ainvoke({"rel_path": "user/service.go", "source": source, "previous_output": previous_doc}, config)
+    return await graph.ainvoke({"rel_path": "user/service.go", "language": "go", "source": source, "previous_output": previous_doc}, config)
 
 
 async def test_valid_draft_finishes_in_one_attempt():
@@ -153,7 +153,7 @@ async def test_session_resumes_from_checkpoint_after_failure():
     config = {"configurable": {"thread_id": "resume"}}
 
     with pytest.raises(RuntimeError):
-        await graph.ainvoke({"rel_path": "user/service.go", "source": SAMPLE_GO}, config)
+        await graph.ainvoke({"rel_path": "user/service.go", "language": "go", "source": SAMPLE_GO}, config)
     assert (await graph.aget_state(config)).next == ("generate",)
 
     state = await graph.ainvoke(None, config)
@@ -211,4 +211,4 @@ async def test_comment_task_does_not_receive_previous_output():
 
 
 def test_find_comment_issues_rejects_empty_output():
-    assert find_comment_issues("  ", SAMPLE_GO, []) == ["Goファイルの本文が空です"]
+    assert find_comment_issues("  ", SAMPLE_GO, []) == ["ファイルの本文が空です"]
