@@ -55,6 +55,7 @@ generate の中身（ファイルごと）:
 起動から終了までの処理の流れ（検証・保存・終了コードなど）は [docs/workflow.md](docs/workflow.md) にまとめている。
 処理対象の言語・フォルダ・ファイル・除外を変える手順は [docs/target_files.md](docs/target_files.md) にまとめている。
 以前の版（Go 専用）からサーバーを入れ替える手順は [docs/migration_multi_language.md](docs/migration_multi_language.md) にまとめている。
+チェックポイント廃止・再生成の見直し版（PR #21）への入れ替え手順は [docs/migration_drop_checkpointer.md](docs/migration_drop_checkpointer.md) にまとめている。
 
 ## サーバー(GB10)へのセットアップ
 
