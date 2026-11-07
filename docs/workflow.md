@@ -79,26 +79,21 @@ NG なら終了コード `2`。
 ## 4. 並列実行
 
 - 処理対象ごとに非同期ジョブを作り、セマフォで同時実行数を `LLM_CONCURRENCY` に抑える（**タスクをまたいだ合計**。Ollama の `OLLAMA_NUM_PARALLEL` に合わせる）
-- グラフの状態は SQLite（`CHECKPOINT_DB`、既定 `state/checkpoints.sqlite`）にチェックポイントとして保存される
+- グラフの状態はチェックポイントとして保存しない。1ファイル×1タスクごとに毎回まっさらな状態から実行する
 - 1件の例外でバッチ全体は止めず、その件を `error` として記録して次へ進む
 
-### 4-1. 再開の判定（`process_file()`）
-
-`thread_id = <run_id>:<タスク>:<相対パスのSHA-1先頭12桁>` でチェックポイントを引き、次のどれかを行う。
+### 4-1. 1件の実行（`process_file()`）
 
 ```mermaid
 flowchart TD
-    s[チェックポイントを取得] --> n{途中のノードがある?}
-    n -->|はい| resume[中断した所から再開]
-    n -->|いいえ| d{status = done?}
-    d -->|はい| reuse[保存済みの結果を使う<br/>出力の書き出しだけ行う]
-    d -->|いいえ| fresh[新規に実行]
-    fresh --> prev{doc タスクで<br/>前回の出力がある?}
+    s[処理対象] --> prev{doc タスクで<br/>前回の出力がある?}
     prev -->|はい| withprev[前回の設計書を添えて実行]
     prev -->|いいえ| noprev[初版として実行]
 ```
 
-同じ `--run-id` で再実行すると、完了済みは再利用、中断・失敗分だけが処理される。
+中断・失敗した実行の途中から再開する仕組みは持たない。再実行すると、完了済みのファイルは manifest（2章）でスキップされ、
+中断・失敗したファイルだけが最初からやり直される。前回の会話（Claude Code のセッション）を引き継がないため、
+膨らんだコンテキストのまま再開してコンテキスト超過を繰り返すことがない。
 
 ### 4-2. 1ファイル×1タスクのグラフ（`doc_graph.py`）
 
@@ -121,8 +116,8 @@ stateDiagram-v2
 | ノード | 処理 |
 |---|---|
 | `prepare` | 入力サイズ（ソース + 前回の出力の文字数）を上限と比較。超えたら `too_large`。超えなければ静的解析で事実（package・imports・types・functions）を抽出し、最初のメッセージを組み立てる |
-| `generate` | Claude Code を1回実行し、応答から全体を囲む ```` ``` ```` を外して下書きにする。セッションIDと計測値（ターン数・入出力トークン数・所要時間）を残す |
-| `validate` | タスクごとの検証を行い、`done` / 再生成 / `failed_validation` を決める |
+| `generate` | Claude Code を1回実行し、応答から全体を囲む ```` ``` ```` を外して下書きにする。計測値（ターン数・入出力トークン数・所要時間）を残す |
+| `validate` | タスクごとの検証を行い、`done` / 再生成 / `failed_validation` を決める。再生成では、最初の依頼文に直前の出力と指摘を追記したメッセージを作り直す（会話は積み上げない） |
 
 入力サイズの上限（[config.py](../godoc_agent/config.py)）は「1トークン≒3文字」の概算で決める。
 
@@ -149,8 +144,8 @@ stateDiagram-v2
 | 作業ディレクトリ | `--repo`（エージェントは関連ファイルを自分で Read / Grep / Glob する） |
 | ツール | `Read,Glob,Grep` のみ。ファイルの保存は runner が行う |
 | 追加ディレクトリ | SKILL.md のあるフォルダ（`--add-dir`。スキルの参照ファイル用） |
-| システムプロンプト | バッチ用ルール + SKILL.md 全文（初回のみ `--append-system-prompt`） |
-| 再生成 | 直前の応答のセッションIDで `--resume` し、指摘だけを送る（読んだ内容を引き継ぐ） |
+| システムプロンプト | バッチ用ルール + SKILL.md 全文（毎回 `--append-system-prompt`） |
+| 再生成 | `--resume` はせず、新しいセッションで起動する。依頼文は「最初の依頼＋直前の出力（`<previous_attempt>`）＋指摘」。試行を重ねても入力は「初回＋直前の出力1つ分」で頭打ちになり、前の試行でツールが読んだ内容も持ち越さない（関連ファイルは必要なら読み直す） |
 | モデル接続 | `ANTHROPIC_BASE_URL` を Ollama に向け、opus/sonnet/haiku すべてを `LLM_MODEL` にする |
 | 外部通信 | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`、`--strict-mcp-config` で MCP を読まない |
 | 上限 | ターン数 `CLAUDE_MAX_TURNS`、出力トークン `LLM_NUM_PREDICT`、時間 `CLAUDE_TIMEOUT_S`（超過で kill） |
@@ -257,4 +252,3 @@ sequenceDiagram
 | `<out>/_commented/.manifest.json` | コメント追記の差分スキップ用ハッシュ |
 | `<out>/_runs/<run_id>.jsonl` | 計測ログ（1ファイル×タスク = 1行） |
 | `<out>/_runs/<run_id>.log` | 標準出力のログ（tmux / nohup / nightly.sh で起動した場合） |
-| `state/checkpoints.sqlite` | LangGraph のチェックポイント（再開用） |

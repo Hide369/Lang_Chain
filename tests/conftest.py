@@ -41,12 +41,12 @@ def good_doc(*identifiers: str) -> str:
     return f"# 詳細設計書\n\n## 1. 概要\n説明 {body}\n\n## 2. 関数・メソッド仕様\n詳細\n"
 
 
-def reply(content: str, *, session_id: str = "s1", input_tokens: int | None = None) -> AIMessage:
+def reply(content: str, *, input_tokens: int | None = None) -> AIMessage:
     """ClaudeCodeLLM が返す応答と同じ形。"""
     return AIMessage(
         content=content,
         response_metadata={
-            "session_id": session_id, "num_turns": 3, "output_tokens": 500,
+            "num_turns": 3, "output_tokens": 500,
             "input_tokens": input_tokens, "cache_read_input_tokens": None, "cache_creation_input_tokens": None,
         },
     )

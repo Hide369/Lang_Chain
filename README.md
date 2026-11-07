@@ -5,7 +5,7 @@ GB10サーバー上で動かし、クライアントのClaude CodeからSSH経�
 
 設計書は、サーバー上の **Claude Code（`claude -p`）がエージェントとして**、既存の **SKILL.md をそのまま使って**書く。
 モデルは Ollama の Anthropic 互換API経由で qwen3-coder-next を使うため、ソースコードはサーバーの外に出ない。
-LangGraph は、その外側で並列制御・差分スキップ・再開・検証・計測を受け持つ。
+LangGraph は、その外側で並列制御・差分スキップ・検証・計測を受け持つ。
 
 同じ仕組みで、**ソースファイルにコメントを追記するスキル**も一括で実行できる（`CLAUDE_COMMENT_SKILL_PATH` を設定した場合。[コメント追記](#コメント追記)を参照）。
 
@@ -14,8 +14,8 @@ runner は常駐サービスではなく、起動すると対象ファイルを�
 
 ## 設計方針（方式A：1ファイル = 1セッション）
 
-- ソースファイル1本×タスク（設計書 `doc` / コメント追記 `comment`）ごとに独立した `thread_id` でグラフを実行する。前のファイルのコンテキストは一切持ち込まない
-- `thread_id = <run_id>:<タスク>:<パスのハッシュ>`。同じ `--run-id` で再実行すると、失敗・中断したものだけがチェックポイントから再開される
+- ソースファイル1本×タスク（設計書 `doc` / コメント追記 `comment`）ごとに、毎回まっさらな状態でグラフを実行する。前のファイルや前回の実行のコンテキストは一切持ち込まない
+- チェックポイントは使わない。中断・失敗しても再実行すれば、完了済みのファイルは差分スキップで飛ばされ、残りが最初から処理される
 - ソースのハッシュをタスクごとに記録し（設計書は `out/.manifest.json`、コメント追記は `out/_commented/.manifest.json`）、変更のないファイルは次回以降スキップする
 - 設計書の構成・書き方は SKILL.md に任せる。検証するのは、本文が空でないことと、公開識別子（静的解析で抽出）がすべて記載されていることだけ
 - 処理対象の言語・フォルダ・ファイル・除外は設定ファイル `targets.toml`（なければ [targets.example.toml](targets.example.toml)）で決める。対応言語は Go・C#・TypeScript（[docs/target_files.md](docs/target_files.md)）
@@ -30,7 +30,7 @@ runner は常駐サービスではなく、起動すると対象ファイルを�
 ```
 prepare ──> generate ──> validate ──> done
    │            ▲            │
-   │            └── retry ───┤（本文が空・公開識別子の記載漏れ → 同じセッションを --resume して指摘だけ送る）
+   │            └── retry ───┤（本文が空・公開識別子の記載漏れ → 新しいセッションに元の依頼＋直前の出力＋指摘を送る）
    └─> too_large             └─> failed_validation
 
 generate の中身（ファイルごと）:
@@ -44,15 +44,15 @@ generate の中身（ファイルごと）:
 |---|---|
 | [godoc_agent/doc_graph.py](godoc_agent/doc_graph.py) | 1ファイル×1タスク分のグラフ（生成・検証・再試行） |
 | [godoc_agent/tasks.py](godoc_agent/tasks.py) | タスク（設計書・コメント追記）ごとのプロンプト・検証・出力先の定義 |
-| [godoc_agent/runner.py](godoc_agent/runner.py) | バッチ実行、並列数制御、差分スキップ、再開、計測ログ |
-| [godoc_agent/claude_code.py](godoc_agent/claude_code.py) | `claude -p` の起動、Ollama への接続設定、セッションの継続（`--resume`） |
+| [godoc_agent/runner.py](godoc_agent/runner.py) | バッチ実行、並列数制御、差分スキップ、計測ログ |
+| [godoc_agent/claude_code.py](godoc_agent/claude_code.py) | `claude -p` の起動（呼び出しごとに新しいセッション）、Ollama への接続設定 |
 | [godoc_agent/prompts.py](godoc_agent/prompts.py) | SKILL.md の読み込みと、エージェントへの指示の組み立て |
 | [godoc_agent/targets.py](godoc_agent/targets.py) | 対象の設定ファイル（targets.toml）の読み込みと、対象ファイルの列挙 |
 | [godoc_agent/analyzers.py](godoc_agent/analyzers.py) | 言語名から解析処理を引く（[go_source.py](godoc_agent/go_source.py)・[csharp_source.py](godoc_agent/csharp_source.py)・[typescript_source.py](godoc_agent/typescript_source.py)：関数・型・公開識別子などの事実抽出。いずれも正規表現の簡易版） |
 | [godoc_agent/source_common.py](godoc_agent/source_common.py) | 言語に共通する字句の分割と、コメント以外の差分検出 |
 | [godoc_agent/preflight.py](godoc_agent/preflight.py) | 開始前の Ollama 接続・モデル存在チェック |
 
-起動から終了までの処理の流れ（再開判定・検証・保存・終了コードなど）は [docs/workflow.md](docs/workflow.md) にまとめている。
+起動から終了までの処理の流れ（検証・保存・終了コードなど）は [docs/workflow.md](docs/workflow.md) にまとめている。
 処理対象の言語・フォルダ・ファイル・除外を変える手順は [docs/target_files.md](docs/target_files.md) にまとめている。
 以前の版（Go 専用）からサーバーを入れ替える手順は [docs/migration_multi_language.md](docs/migration_multi_language.md) にまとめている。
 
@@ -149,7 +149,7 @@ ssh gb10 "cd /opt/Lang_Chain && .venv/bin/python -m godoc_agent.runner --repo /s
 
 - 最初に `run_id=trial-comment タスク=comment 対象=3 件` と表示され、1ファイル終わるごとに `[1/3] done ... comment user_api/pkg/handler/xxx.go` のような行が出る
 - 1ファイル数分〜十数分かかる。Claude Code から依頼する場合は Bash ツールの時間上限（10分）で打ち切られるため、[2. SSHが切れても止まらないように起動する](#2-sshが切れても止まらないように起動する)の tmux の形で起動する
-- 途中で止まったら、同じコマンドをもう一度実行すれば続きから再開する
+- 途中で止まったら、同じコマンドをもう一度実行すれば、完了済みのファイルを飛ばして残りを最初から処理する
 
 **手順5. 結果を確認する**
 
@@ -192,7 +192,7 @@ python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --limit 5
 # 全件（夜間バッチ）
 python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --run-id nightly-20261102
 
-# 途中で止まった・失敗があった場合は同じ run-id で再実行
+# 途中で止まった・失敗があった場合は同じコマンドで再実行（完了済みは飛ばし、残りを最初から処理する）
 python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --run-id nightly-20261102
 
 # タスクを選んで実行（省略時は doc と、CLAUDE_COMMENT_SKILL_PATH があれば comment も）
@@ -277,8 +277,8 @@ ssh gb10 "tmux new -d -s godoc 'cd /opt/Lang_Chain && mkdir -p out/_runs && .ven
 ssh gb10 "cd /opt/Lang_Chain && mkdir -p out/_runs && nohup .venv/bin/python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --run-id nightly-20261102 > out/_runs/nightly-20261102.log 2>&1 < /dev/null &"
 ```
 
-- **`--run-id` は必ず明示する**。省略すると実行のたびに日時から新しい値が作られ、中断した実行を再開できない
-- 万一止まっても、同じ `--run-id` で再実行すれば完了済みのファイルを飛ばして続きから再開する
+- `--run-id` は計測ログ・標準出力ログのファイル名になる。同じ値で再実行すると同じログに追記されるので、明示しておくと追いやすい
+- 万一止まっても、同じコマンドで再実行すれば完了済みのファイルを飛ばし、残りを最初から処理する
 - `--limit 5` 程度のPoC実行なら、10分以内に終わる見込みがあれば直接起動でもよい（この場合はPCを落とすと止まる）
 
 進捗の確認:
@@ -306,10 +306,10 @@ tmux / nohup で起動していれば、**起動後はクライアントPCを落
 | 要因 | 対策 |
 |---|---|
 | GB10 のスリープ・自動サスペンド（Ubuntuデスクトップ版では既定で有効な場合がある） | `sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target` で無効にする |
-| サーバーの再起動、Ollama の停止 | 同じ `--run-id` で再実行すれば続きから再開する |
+| サーバーの再起動、Ollama の停止 | 同じコマンドで再実行すれば、完了済みを飛ばして残りを処理する |
 
 PCを再起動した後は、ログの末尾にサマリー（`対象: ... 件 / 経過時間: ...`）が出ていれば完了している。
-失敗した件があった場合や途中で止まっていた場合は、同じ `--run-id` で再実行すると残りだけが処理される。完了したら次の手順で設計書を取得する。
+失敗した件があった場合や途中で止まっていた場合は、同じコマンドで再実行すると残りだけが（最初から）処理される。完了したら次の手順で設計書を取得する。
 
 ### 3. 設計書を取得する
 
@@ -393,7 +393,7 @@ sudo systemctl disable --now godoc-nightly.timer    # 定期実行を止める
 ```
 
 - 実行時刻を変えるには `sudo systemctl edit --full godoc-nightly.timer` で `OnCalendar=` を直す（例：`*-*-* 23:30:00`）
-- `--run-id` は `nightly-<日付>`。同じ日に `systemctl start` で再実行すると、中断・失敗したファイルの続きから再開する
+- `--run-id` は `nightly-<日付>`。同じ日に `systemctl start` で再実行すると、中断・失敗したファイルだけを最初から処理し、同じ日のログに追記する
 - 実行時刻にサーバーが停止していた場合は、起動後に実行される（`Persistent=true`）
 - 前回の実行が終わっていなければ、次の起動は行われない（systemd が二重起動を防ぐ）。12時間を超えると強制終了する（`TimeoutStartSec=12h`）
 - 夜間実行中に、同じ `--out` へ手動実行を重ねないこと（差分スキップの記録が混ざる）
@@ -425,10 +425,11 @@ sudo systemctl disable --now godoc-nightly.timer    # 定期実行を止める
 
 - **事実抽出は正規表現による簡易版**。複雑な宣言を取りこぼす可能性がある。本番では `go/ast` を使う補助ツールに置き換える
 - **入力の切り捨てを検出できない**。Claude Code はコンテキストの大きさを知らないまま会話を伸ばし、Ollama は `OLLAMA_CONTEXT_LENGTH` を超えた分を黙って切り捨てる。大きすぎるファイルは「1トークン≒3文字」の概算で事前に `too_large` とし、ターン数は `CLAUDE_MAX_TURNS` で抑えている。実行後は入力トークン数が上限に近ければ `warnings` に残すが、切り捨てそのものを検出するわけではなく、`usage` が返らなければ警告も出ない
+- **再生成は新しいセッションで行う**。以前は同じセッションを `--resume` して指摘だけを送っていたが、試行のたびにツールで読んだ内容が積み上がりコンテキストを超えたため、毎回「最初の依頼＋直前の出力＋指摘」を送り直す形にした。代わりに、再生成では関連ファイルを読み直す分の時間がかかり、入力は直前の出力1つ分だけ初回より大きくなる
 - 安定性は、ローカルモデルが Claude Code のツールを正しく使えるかに左右される。同じ操作の繰り返しや途中終了は `error`（`error_max_turns` など）として記録される
 - 設計書の構成（見出し）は検証しない。SKILL.md どおりの構成になっているかは、PoCで出力を確認する
 - コメント追記の検証は、Pythonで書いた簡易な字句解析でコメントと空白を除いて比較している。コードの同一性は保証するが、出力が `gofmt` 済みかどうか・コンパイルできるかは確認しない（取り込む前に `gofmt -l` / `go build` で確認する）
-- この版から `thread_id` にタスク名が入ったため、更新前の版で中断した実行は同じ `--run-id` でも再開されず、最初から処理される（差分スキップの記録 `.manifest.json` はそのまま使える）
+- チェックポイント（`state/checkpoints.sqlite`）は使わなくなった。更新前の版で作られたファイルは不要なので削除してよい。`.env` の `CHECKPOINT_DB` も読まれない（差分スキップの記録 `.manifest.json` はそのまま使える）
 - 履歴の引き継ぎ（前回までの行が残っているか、版が上がっているか）は検証しない。ローカルモデルが履歴を書き換えたり落としたりしないかは、PoCで2回目以降の出力を確認する
 - パッケージ単位の集約、人による承認（interrupt）は未実装（次のフェーズ）
 - LangSmithのトレースはスキル・プロンプト・生成された設計書を外部に送信するため、既定では無効

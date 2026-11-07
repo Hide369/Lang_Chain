@@ -51,7 +51,6 @@ class Settings:
     num_predict: int
     concurrency: int
     max_attempts: int
-    checkpoint_db: Path
     claude_bin: str
     claude_skill_path: Path
     claude_comment_skill_path: Path | None
@@ -88,7 +87,6 @@ def load_settings() -> Settings:
         num_predict=_int_env("LLM_NUM_PREDICT", 8192),
         concurrency=_int_env("LLM_CONCURRENCY", 2),
         max_attempts=_int_env("DOC_MAX_ATTEMPTS", 3),
-        checkpoint_db=Path(os.getenv("CHECKPOINT_DB", base_dir / "state" / "checkpoints.sqlite")),
         claude_bin=os.getenv("CLAUDE_BIN", "claude"),
         claude_skill_path=Path(
             os.getenv("CLAUDE_SKILL_PATH") or base_dir / "skills" / DESIGN_SKILL_NAME / "SKILL.md"
