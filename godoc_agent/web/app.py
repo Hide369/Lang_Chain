@@ -6,17 +6,22 @@
 
 import base64
 import binascii
+from collections.abc import Callable
+from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
-from ..tasks import COMMENT, DOC
+from ..skill_registry import OUTPUT_TYPE_LABELS, OUTPUT_TYPES
 from .auth import LoginThrottle, SessionStore, validate_password_hash, verify_password
+from .git_repo import GitRepoError, inspect_repo
 from .jobs import JobBusy, JobManager
+from .schedule import Scheduler, ScheduleStore
 from .settings import APP_DIR, WebSettings
-from .skills import SkillFile, SkillStore, skill_dirs
+from .skills import SkillFile, SkillStore
 from .targets_editor import TargetsEditor
 from .workspace import WorkspaceStore
 
@@ -31,10 +36,21 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=1024)
 
 
+MAX_TASKS = 20
+
+
 class RunRequest(BaseModel):
-    tasks: list[str] = Field(default_factory=list, max_length=2)
+    tasks: list[str] = Field(min_length=1, max_length=MAX_TASKS)
     limit: int = Field(default=0, ge=0, le=100_000)
     force: bool = False
+    git_pull: bool = False
+
+
+class ScheduleRequest(BaseModel):
+    enabled: bool
+    time: str = Field(min_length=5, max_length=5)
+    tasks: list[str] = Field(min_length=1, max_length=MAX_TASKS)
+    git_pull: bool = True
 
 
 class WorkspaceRequest(BaseModel):
@@ -49,6 +65,8 @@ class UploadedFile(BaseModel):
 
 class SkillUpload(BaseModel):
     files: list[UploadedFile] = Field(min_length=1)
+    # 追加のスキルの出力の種類（document / comment / rewrite）。新しく登録するときは必須
+    type: str | None = None
 
 
 class TargetsRequest(BaseModel):
@@ -61,19 +79,53 @@ def create_app(
     throttle: LoginThrottle | None = None,
     app_dir: Path = APP_DIR,
     skills: SkillStore | None = None,
+    clock: Callable[[], datetime] = datetime.now,
 ) -> FastAPI:
     validate_password_hash(settings.admin_password_hash)
     jobs = jobs or JobManager()
     sessions = SessionStore(settings.session_ttl_s)
     throttle = throttle or LoginThrottle()
     workspace = WorkspaceStore(settings.state_dir, settings.browse_roots)
-    skills = skills or SkillStore(skill_dirs(app_dir))
+    skills = skills or SkillStore(app_dir)
     targets = TargetsEditor(app_dir)
+    schedule_store = ScheduleStore(settings.state_dir)
+    scheduler = Scheduler(schedule_store, jobs, workspace, skills, clock)
 
-    app = FastAPI(title="設計書生成", docs_url=None, redoc_url=None, openapi_url=None)
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        # 定期実行は Web 画面が動いている間だけ動く（起動時に、過ぎていた今日の分があれば実行する）
+        scheduler.start()
+        try:
+            yield
+        finally:
+            scheduler.stop()
 
-    def available_tasks() -> list[str]:
-        return [DOC] + ([COMMENT] if skills.is_registered(COMMENT) else [])
+    app = FastAPI(title="設計書生成", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+    app.state.scheduler = scheduler
+
+    def task_options() -> list[dict]:
+        """実行・定期実行で選べるタスク（SKILL.md が置かれている登録済みのスキル）。"""
+        return [{"name": s.name, "label": s.label, "type": s.output_type} for s in registered_skills()]
+
+    def registered_skills():
+        try:
+            return skills.registered()
+        except ValueError as e:  # skills/registry.json が壊れている
+            raise HTTPException(500, str(e)) from e
+
+    def check_pullable(repo: Path) -> None:
+        # 実行時（pull_and_run）にも同じ確認をするが、ボタンを押した時点で分かるようにする
+        try:
+            inspect_repo(repo)
+        except GitRepoError as e:
+            raise HTTPException(400, f"実行前の git pull ができません: {e}") from e
+
+    def check_tasks(names: list[str]) -> list[str]:
+        available = {s.name for s in registered_skills()}
+        unknown = [t for t in names if t not in available]
+        if unknown:
+            raise HTTPException(400, f"登録されていないスキルです: {', '.join(unknown)}")
+        return list(dict.fromkeys(names))
 
     def is_admin(request: Request) -> bool:
         return sessions.is_valid(request.cookies.get(COOKIE_NAME))
@@ -161,7 +213,7 @@ def create_app(
     @app.get("/api/config", dependencies=[Depends(require_viewer)])
     def config() -> dict:
         ws = workspace.get()
-        return {"tasks": available_tasks(), "workspace": {"repo": ws.repo, "out": ws.out}}
+        return {"tasks": task_options(), "workspace": {"repo": ws.repo, "out": ws.out}}
 
     @app.get("/api/status", dependencies=[Depends(require_viewer)])
     def status() -> dict:
@@ -214,13 +266,11 @@ def create_app(
             repo, out = workspace.check_repo(ws.repo), workspace.check_out(ws.out)
         except (ValueError, PermissionError) as e:
             raise HTTPException(400, str(e)) from e
-        unknown = [t for t in body.tasks if t not in available_tasks()]
-        if unknown:
-            raise HTTPException(400, f"実行できないタスクです（スキル未登録）: {', '.join(unknown)}")
-        if not skills.is_registered(DOC) and (DOC in body.tasks or not body.tasks):
-            raise HTTPException(400, "設計書スキルが登録されていません。「スキル」から登録してください")
+        tasks = check_tasks(body.tasks)
+        if body.git_pull:
+            check_pullable(repo)
         try:
-            job = jobs.start(repo, out, list(dict.fromkeys(body.tasks)), body.limit, body.force)
+            job = jobs.start(repo, out, tasks, body.limit, body.force, git_pull=body.git_pull)
         except JobBusy as e:
             raise HTTPException(409, str(e)) from e
         return job.to_dict()
@@ -231,6 +281,37 @@ def create_app(
         if job is None:
             raise HTTPException(409, "Web から起動した実行中の処理はありません")
         return job.to_dict()
+
+    # --- 定期実行（閲覧は誰でも、変更は管理者だけ） ------------------------------------------------
+
+    def schedule_view() -> dict:
+        schedule = schedule_store.get()
+        next_run = schedule.next_run_at(clock())
+        return {
+            "enabled": schedule.enabled,
+            "time": schedule.time,
+            "tasks": schedule.tasks,
+            "git_pull": schedule.git_pull,
+            "next_run_at": next_run.isoformat(timespec="minutes") if next_run else None,
+            "last_run": schedule.last_run,
+        }
+
+    @app.get("/api/schedule", dependencies=[Depends(require_viewer)])
+    def get_schedule() -> dict:
+        return schedule_view()
+
+    @app.put("/api/schedule", dependencies=[Depends(require_admin)])
+    def save_schedule(body: ScheduleRequest) -> dict:
+        tasks = check_tasks(body.tasks)
+        repo = workspace.get().repo
+        # フォルダが未設定なら、実行時に「開始できなかった」と記録される（ここでは保存を妨げない）
+        if body.enabled and body.git_pull and repo:
+            check_pullable(Path(repo))
+        try:
+            schedule_store.save_settings(body.enabled, body.time, tasks, body.git_pull, clock())
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        return schedule_view()
 
     # --- フォルダ（管理者だけ） ------------------------------------------------------------
 
@@ -253,45 +334,53 @@ def create_app(
 
     # --- スキル（管理者だけ） --------------------------------------------------------------
 
-    def check_kind(kind: str) -> str:
-        if kind not in (DOC, COMMENT):
-            raise HTTPException(404, "スキルの種類が正しくありません")
-        return kind
+    def all_skills() -> list[dict]:
+        try:
+            return [skills.info(s) for s in skills.all()]
+        except ValueError as e:  # skills/registry.json が壊れている
+            raise HTTPException(500, str(e)) from e
 
     @app.get("/api/skills", dependencies=[Depends(require_admin)])
-    def list_skills() -> list[dict]:
-        return [skills.info(DOC), skills.info(COMMENT)]
+    def list_skills() -> dict:
+        return {
+            "skills": all_skills(),
+            "types": [{"type": t, "label": OUTPUT_TYPE_LABELS[t]} for t in OUTPUT_TYPES],
+        }
 
-    @app.get("/api/skills/{kind}/content", dependencies=[Depends(require_admin)])
-    def skill_content(kind: str) -> PlainTextResponse:
+    @app.get("/api/skills/{name}/content", dependencies=[Depends(require_admin)])
+    def skill_content(name: str) -> PlainTextResponse:
         try:
-            return PlainTextResponse(skills.read_skill(check_kind(kind)))
+            return PlainTextResponse(skills.read_skill(name))
+        except ValueError as e:
+            raise HTTPException(404, str(e)) from e
         except FileNotFoundError as e:
             raise HTTPException(404, "スキルが登録されていません") from e
 
-    @app.put("/api/skills/{kind}", dependencies=[Depends(require_admin), Depends(require_idle)])
-    def upload_skill(kind: str, body: SkillUpload) -> dict:
-        check_kind(kind)
+    @app.put("/api/skills/{name}", dependencies=[Depends(require_admin), Depends(require_idle)])
+    def upload_skill(name: str, body: SkillUpload) -> dict:
         try:
             files = [SkillFile(f.path, base64.b64decode(f.content_b64, validate=True)) for f in body.files]
         except (binascii.Error, ValueError) as e:
             raise HTTPException(400, "ファイルの内容が正しく送られていません") from e
         try:
-            return skills.install(kind, files)
+            return skills.install(name, files, body.type)
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
 
-    @app.delete("/api/skills/{kind}", dependencies=[Depends(require_admin), Depends(require_idle)])
-    def remove_skill(kind: str) -> dict:
+    @app.delete("/api/skills/{name}", dependencies=[Depends(require_admin), Depends(require_idle)])
+    def remove_skill(name: str) -> dict:
         try:
-            return skills.remove(check_kind(kind))
+            skills.remove(name)
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
+        return {"skills": all_skills()}
 
-    @app.post("/api/skills/{kind}/restore", dependencies=[Depends(require_admin), Depends(require_idle)])
-    def restore_skill(kind: str) -> dict:
+    @app.post("/api/skills/{name}/restore", dependencies=[Depends(require_admin), Depends(require_idle)])
+    def restore_skill(name: str) -> dict:
         try:
-            return skills.restore(check_kind(kind))
+            return skills.restore(name)
+        except ValueError as e:
+            raise HTTPException(404, str(e)) from e
         except FileNotFoundError as e:
             raise HTTPException(404, str(e)) from e
 

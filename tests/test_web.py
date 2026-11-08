@@ -2,13 +2,14 @@ import base64
 import shutil
 import sys
 import tomllib
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from godoc_agent.runlock import run_lock
-from godoc_agent.tasks import COMMENT, DOC
+from godoc_agent.skill_registry import COMMENT, DOC, read_registry
 from godoc_agent.web.app import CSRF_HEADER, CSRF_VALUE, create_app
 from godoc_agent.web.auth import LoginThrottle, hash_password, verify_password
 from godoc_agent.web.jobs import JobManager
@@ -60,9 +61,12 @@ def app_dir(tmp_path: Path, monkeypatch) -> Path:
 
 
 @pytest.fixture
-def skills(app_dir: Path) -> SkillStore:
-    store = SkillStore({DOC: app_dir / "skills" / "design-doc-batch", COMMENT: app_dir / "skills" / "comment-batch"})
-    skill = store.dirs[DOC] / "SKILL.md"
+def skills(app_dir: Path, monkeypatch) -> SkillStore:
+    # 組み込みのスキルは、テスト用のアプリのフォルダ（skills/design-doc-batch・skills/comment-batch）に置く
+    monkeypatch.delenv("CLAUDE_SKILL_PATH", raising=False)
+    monkeypatch.delenv("CLAUDE_COMMENT_SKILL_PATH", raising=False)
+    store = SkillStore(app_dir)
+    skill = skill_dir(store, DOC) / "SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_text("# 設計書スキル\n", encoding="utf-8")
     return store
@@ -79,6 +83,10 @@ def jobs(monkeypatch) -> JobManager:
         manager.current.proc.wait(timeout=10)
 
 
+def skill_dir(store: SkillStore, name: str) -> Path:
+    return store.get(name).skill_dir
+
+
 def make_settings(password_hash: str, root: Path, state_dir: Path, **overrides) -> WebSettings:
     values = dict(
         admin_password_hash=password_hash, browse_roots=(root.resolve(),), state_dir=state_dir,
@@ -90,9 +98,9 @@ def make_settings(password_hash: str, root: Path, state_dir: Path, **overrides) 
 
 @pytest.fixture
 def make_client(password_hash, root, tmp_path, jobs, app_dir, skills):
-    def make(throttle: LoginThrottle | None = None, **overrides) -> TestClient:
+    def make(throttle: LoginThrottle | None = None, clock=datetime.now, **overrides) -> TestClient:
         settings = make_settings(password_hash, root, tmp_path / "state", **overrides)
-        return TestClient(create_app(settings, jobs, throttle, app_dir=app_dir, skills=skills))
+        return TestClient(create_app(settings, jobs, throttle, app_dir=app_dir, skills=skills, clock=clock))
 
     return make
 
@@ -124,6 +132,10 @@ def start_run(client: TestClient, **body):
 
 def wait_finished(jobs: JobManager) -> None:
     jobs.current.proc.wait(timeout=20)
+
+
+def task_names(client: TestClient) -> list[str]:
+    return [t["name"] for t in client.get("/api/config").json()["tasks"]]
 
 
 def b64(text: str) -> str:
@@ -194,7 +206,10 @@ def test_admin_only_endpoints_reject_viewers(client, method, path):
 
 def test_viewer_can_see_status_config_and_targets(client):
     assert client.get("/api/status").status_code == 200
-    assert client.get("/api/config").json() == {"tasks": ["doc"], "workspace": {"repo": None, "out": None}}
+    assert client.get("/api/config").json() == {
+        "tasks": [{"name": "doc", "label": "設計書", "type": "document"}],
+        "workspace": {"repo": None, "out": None},
+    }
     assert client.get("/api/targets").status_code == 200
 
 
@@ -264,16 +279,16 @@ def test_run_requires_folders_and_design_skill(client, skills, repo_dir, out_dir
     assert "フォルダ" in res.json()["detail"]
 
     set_workspace(client, repo_dir, out_dir)
-    (skills.dirs[DOC] / "SKILL.md").unlink()
+    (skill_dir(skills, DOC) / "SKILL.md").unlink()
     res = start_run(client)
     assert res.status_code == 400
-    assert "設計書スキル" in res.json()["detail"]
+    assert "登録されていないスキル" in res.json()["detail"]
 
 
 def test_comment_task_needs_registered_skill(admin):
     res = start_run(admin, tasks=["comment"])
     assert res.status_code == 400
-    assert "スキル未登録" in res.json()["detail"]
+    assert "登録されていないスキル" in res.json()["detail"]
 
 
 def test_second_run_is_rejected_while_running(admin, monkeypatch):
@@ -339,14 +354,14 @@ def test_register_skill_folder_and_enable_comment_task(admin, skills):
     res = admin.put("/api/skills/comment", json={"files": files}, headers=CSRF)
     assert res.status_code == 200
     assert [f["path"] for f in res.json()["files"]] == ["SKILL.md", "references/rules.md"]
-    assert (skills.dirs[COMMENT] / "references" / "rules.md").read_text(encoding="utf-8") == "ルール\n"
+    assert (skill_dir(skills, COMMENT) / "references" / "rules.md").read_text(encoding="utf-8") == "ルール\n"
     assert admin.get("/api/skills/comment/content").text == "# コメント追記\n"
     # 登録するとコメント追記を選べるようになる
-    assert admin.get("/api/config").json()["tasks"] == ["doc", "comment"]
+    assert task_names(admin) == ["doc", "comment"]
 
     # 登録を外すと選べなくなり、直前に戻すと元に戻る
-    assert admin.delete("/api/skills/comment", headers=CSRF).json()["registered"] is False
-    assert admin.get("/api/config").json()["tasks"] == ["doc"]
+    assert admin.delete("/api/skills/comment", headers=CSRF).status_code == 200
+    assert task_names(admin) == ["doc"]
     assert admin.post("/api/skills/comment/restore", headers=CSRF).json()["registered"] is True
 
 
@@ -356,6 +371,73 @@ def test_replacing_skill_keeps_previous_one_for_restore(admin, skills):
     assert admin.get("/api/skills/doc/content").text == "# 新しいスキル\n"
     admin.post("/api/skills/doc/restore", headers=CSRF)
     assert admin.get("/api/skills/doc/content").text == "# 設計書スキル\n"
+
+
+def upload_custom(client: TestClient, name: str, type_: str | None, text: str = "# 追加スキル\n"):
+    body = {"files": [{"path": "SKILL.md", "content_b64": b64(text)}], "type": type_}
+    return client.put(f"/api/skills/{name}", json=body, headers=CSRF)
+
+
+def test_custom_skill_can_be_added_run_and_removed(admin, jobs, app_dir):
+    res = upload_custom(admin, "test-spec", "document")
+    assert res.status_code == 200
+    assert res.json()["type"] == "document"
+    assert res.json()["out_subdir"] == "_test-spec"
+    assert read_registry(app_dir) == {"test-spec": "document"}
+    assert (app_dir / "skills" / "test-spec" / "SKILL.md").is_file()
+
+    # 実行・定期実行で選べるようになり、runner には --tasks で名前が渡る
+    assert task_names(admin) == ["doc", "test-spec"]
+    run_id = start_run(admin, tasks=["doc", "test-spec"]).json()["run_id"]
+    wait_finished(jobs)
+    assert "--tasks doc,test-spec" in admin.get(f"/api/runs/{run_id}/log").json()["text"]
+
+    listed = admin.get("/api/skills").json()
+    assert [s["name"] for s in listed["skills"]] == ["doc", "comment", "test-spec"]
+    assert {t["type"] for t in listed["types"]} == {"document", "comment", "rewrite"}
+
+    # 登録を外すと一覧からも消える
+    assert admin.delete("/api/skills/test-spec", headers=CSRF).status_code == 200
+    assert read_registry(app_dir) == {}
+    assert task_names(admin) == ["doc"]
+
+
+def test_custom_skill_keeps_type_when_replaced(admin, app_dir):
+    upload_custom(admin, "fmt", "rewrite")
+    # 入れ替えでは種類を省略でき、前の種類のまま
+    res = upload_custom(admin, "fmt", None, "# 新しい版\n")
+    assert res.status_code == 200
+    assert res.json()["type"] == "rewrite"
+    assert res.json()["has_backup"] is True
+
+
+@pytest.mark.parametrize(
+    "name, type_, error",
+    [
+        ("new-skill", None, "出力の種類"),
+        ("new-skill", "unknown", "出力の種類"),
+        ("Bad_Name", "document", "スキル名"),
+        ("design-doc-batch", "document", "予約"),
+        ("runs", "document", "予約"),
+    ],
+)
+def test_invalid_custom_skill_is_rejected(admin, app_dir, name, type_, error):
+    res = upload_custom(admin, name, type_)
+    assert res.status_code == 400
+    assert error in res.json()["detail"]
+    assert read_registry(app_dir) == {}
+
+
+def test_builtin_skill_type_cannot_be_changed(admin):
+    res = upload_custom(admin, "doc", "rewrite")
+    assert res.status_code == 400
+
+
+def test_outputs_of_custom_skill_are_labeled_with_its_name(outputs, out_dir):
+    (out_dir / "_test-spec" / "user_api").mkdir(parents=True)
+    (out_dir / "_test-spec" / "user_api" / "user.go.md").write_text("# 仕様\n", encoding="utf-8")
+    kinds = {i["path"]: i["kind"] for i in outputs.get("/api/outputs").json()}
+    assert kinds["_test-spec/user_api/user.go.md"] == "test-spec"
 
 
 def test_design_skill_cannot_be_removed(admin):
@@ -376,8 +458,8 @@ def test_invalid_skill_uploads_are_rejected_and_keep_current_skill(admin, skills
     res = admin.put("/api/skills/doc", json={"files": files}, headers=CSRF)
     assert res.status_code == 400
     assert error in res.json()["detail"]
-    assert (skills.dirs[DOC] / "SKILL.md").read_text(encoding="utf-8") == "# 設計書スキル\n"
-    assert not (skills.dirs[DOC].parent / "evil.md").exists()
+    assert (skill_dir(skills, DOC) / "SKILL.md").read_text(encoding="utf-8") == "# 設計書スキル\n"
+    assert not (skill_dir(skills, DOC).parent / "evil.md").exists()
 
 
 # --- 対象の設定（targets.toml） ------------------------------------------------------------

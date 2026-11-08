@@ -8,6 +8,7 @@ from conftest import ScriptedLLM, claude_result, good_doc, reply
 from godoc_agent import runner
 from godoc_agent.config import load_settings
 from godoc_agent.runlock import RunLockBusy, run_lock
+from godoc_agent.skill_registry import COMMENT_ONLY, DOCUMENT, REWRITE, write_registry
 
 HEALTH = "user_api/pkg/handler/health.go"
 USER = "user_api/pkg/handler/user.go"
@@ -358,6 +359,61 @@ async def test_comment_task_rejects_file_exceeding_output_limit(env, comment_ski
     assert {json.loads(line)["status"] for line in logs} == {"too_large"}
 
 
-def test_unknown_task_name_is_rejected():
+async def test_unknown_task_name_is_rejected(env, repo, tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "APP_DIR", tmp_path / "app")
+    with pytest.raises(ValueError, match="lint.*登録されていません"):
+        await run_batch(repo, tmp_path / "out", "--tasks", "doc,lint")
+
+
+def test_empty_task_list_is_rejected():
     with pytest.raises(SystemExit):
-        runner.parse_args(["--repo", ".", "--out", "out", "--tasks", "doc,lint"])
+        runner.parse_args(["--repo", ".", "--out", "out", "--tasks", " , "])
+
+
+@pytest.fixture
+def custom_skills(monkeypatch, tmp_path: Path) -> Path:
+    """skills/registry.json で追加した3種類のスキル（文書・コメントだけ変更・コード変更あり）。"""
+    app = tmp_path / "app"
+    write_registry(app, {"test-spec": DOCUMENT, "jp-comment": COMMENT_ONLY, "fmt": REWRITE})
+    for name in ("test-spec", "jp-comment", "fmt"):
+        (app / "skills" / name).mkdir(parents=True)
+        (app / "skills" / name / "SKILL.md").write_text(f"# {name} スキル\n", encoding="utf-8")
+    monkeypatch.setattr(runner, "APP_DIR", app)
+    return app
+
+
+async def test_runs_registered_custom_skills(env, custom_skills, monkeypatch, repo, tmp_path):
+    out = tmp_path / "out"
+    health = (repo / HEALTH).read_text(encoding="utf-8")
+    llm = ScriptedLLM([
+        reply("# テスト仕様書\nHealth の確認\n"),  # test-spec（文書）
+        reply("// ヘルスチェック\n" + health),  # jp-comment（コメントだけ）
+        reply(health.replace("func Health() {}", "func Health() {\n}")),  # fmt（コードも変更）
+    ])
+    use_llm(monkeypatch, llm)
+
+    assert await run_batch(repo, out, "--tasks", "test-spec,jp-comment,fmt", "--limit", "3") == 0
+    assert (out / "_test-spec" / f"{HEALTH}.md").read_text(encoding="utf-8").startswith("# テスト仕様書")
+    assert (out / "_jp-comment" / HEALTH).read_text(encoding="utf-8").startswith("// ヘルスチェック")
+    assert "func Health() {\n}" in (out / "_fmt" / HEALTH).read_text(encoding="utf-8")
+    # スキルごとに差分スキップの記録を持つ
+    for name in ("test-spec", "jp-comment", "fmt"):
+        assert HEALTH in json.loads((out / f"_{name}" / ".manifest.json").read_text(encoding="utf-8"))
+    # 文書のスキルには SKILL.md の内容と、文書を作る依頼を送る
+    first = llm.calls[0]
+    assert "# test-spec スキル" in first[0].content
+    assert "スキルに従って文書を作成してください" in first[-1].content
+
+
+async def test_custom_comment_skill_rejects_code_changes(env, custom_skills, monkeypatch, repo, tmp_path):
+    out = tmp_path / "out"
+    changed = "package handler\n\nfunc Health() { _ = 1 }\n"
+    use_llm(monkeypatch, ScriptedLLM([reply(changed)] * 3))
+    assert await run_batch(repo, out, "--tasks", "jp-comment", "--limit", "1") == 1
+    assert not (out / "_jp-comment" / HEALTH).exists()
+
+
+async def test_custom_skill_without_skill_file_is_reported(env, custom_skills, repo, tmp_path):
+    (custom_skills / "skills" / "fmt" / "SKILL.md").unlink()
+    with pytest.raises(FileNotFoundError, match="SKILL.md"):
+        await run_batch(repo, tmp_path / "out", "--tasks", "fmt")

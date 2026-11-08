@@ -5,6 +5,7 @@
 接続先・ポートは .env の WEB_HOST / WEB_PORT（既定 127.0.0.1:4000）。
 """
 
+import logging
 import sys
 
 import uvicorn
@@ -16,6 +17,8 @@ from .settings import APP_DIR, load_web_settings
 
 def main() -> int:
     load_dotenv(APP_DIR / ".env")
+    # 定期実行の開始・失敗を journal（systemd）に残す
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     try:
         settings = load_web_settings()
         app = create_app(settings)
