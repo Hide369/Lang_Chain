@@ -7,6 +7,7 @@ import pytest
 from conftest import ScriptedLLM, claude_result, good_doc, reply
 from godoc_agent import runner
 from godoc_agent.config import load_settings
+from godoc_agent.runlock import RunLockBusy, run_lock
 
 HEALTH = "user_api/pkg/handler/health.go"
 USER = "user_api/pkg/handler/user.go"
@@ -70,6 +71,15 @@ async def test_generates_docs_and_skips_unchanged_files_next_time(env, monkeypat
     # 2回目は変更がないのでLLMは呼ばれない（呼ばれたらScriptedLLMが失敗する）
     use_llm(monkeypatch, ScriptedLLM([]))
     assert await run_batch(repo, out, "--run-id", "r2") == 0
+
+
+async def test_refuses_to_run_while_another_run_uses_the_same_out_dir(env, monkeypatch, repo, tmp_path):
+    out = tmp_path / "out"
+    use_llm(monkeypatch, ScriptedLLM([]))
+    # 夜間バッチや Web 画面からの実行が同じ出力先で動いている状態
+    with run_lock(out):
+        with pytest.raises(RunLockBusy):
+            await run_batch(repo, out)
 
 
 async def test_changed_file_is_revised_from_previous_doc(env, monkeypatch, repo, tmp_path):

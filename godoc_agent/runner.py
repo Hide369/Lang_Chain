@@ -27,6 +27,7 @@ from .doc_graph import build_doc_graph
 from .source_common import sha256_text
 from .preflight import preflight
 from .prompts import load_skill
+from .runlock import run_lock
 from .targets import discover_source_files
 from .tasks import COMMENT, DOC, TASK_NAMES, Task, comment_task, design_doc_task
 
@@ -167,7 +168,7 @@ def summarize(results: list[FileResult], wall_s: float) -> str:
 def selected_tasks(requested: list[str] | None, settings: Settings) -> list[str]:
     if requested:
         return requested
-    # 指定がなければ、設計書に加えて、コメント追記スキルが設定されていればそれも実行する
+    # 指定がなければ、設計書に加えて、コメント追記スキルが設定されていれば（置かれていれば）それも実行する
     return [DOC] + ([COMMENT] if settings.claude_comment_skill_path else [])
 
 
@@ -190,6 +191,12 @@ async def run(args: argparse.Namespace, settings: Settings) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "_runs").mkdir(exist_ok=True)
 
+    # Web 画面・コマンド・夜間タイマーのどこから起動しても、同じ出力先では1つずつしか実行しない
+    with run_lock(out_dir):
+        return await _run_batch(args, settings, repo, out_dir)
+
+
+async def _run_batch(args: argparse.Namespace, settings: Settings, repo: Path, out_dir: Path) -> int:
     # エージェントは読み取り系ツールしか使えず日付を調べられないため、ここで渡す。
     # 実行中に日付をまたいでも、同じ実行の出力はすべて同じ日付になるよう一度だけ取得する
     today = date.today()
@@ -279,7 +286,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--run-id", default=datetime.now().strftime("%Y%m%d-%H%M%S"), help="計測ログ（<out>/_runs/<run_id>.jsonl）の名前。同じ値なら同じファイルに追記する")
     p.add_argument(
         "--tasks", type=_task_list, default=None,
-        help="実行するタスク（doc,comment）。省略時は doc と、CLAUDE_COMMENT_SKILL_PATH が設定されていれば comment",
+        help="実行するタスク（doc,comment）。省略時は doc と、コメント追記スキル（CLAUDE_COMMENT_SKILL_PATH または skills/comment-batch/SKILL.md）があれば comment",
     )
     p.add_argument("--limit", type=int, default=0, help="処理件数の上限（PoC用。ファイル×タスクの件数）")
     p.add_argument("--force", action="store_true", help="変更のないファイルも再生成する")
