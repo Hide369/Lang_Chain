@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from godoc_agent import config
-from godoc_agent.config import load_settings, targets_config_path
+from godoc_agent.config import comment_skill_path, load_settings, targets_config_path
 
 REPO_ROOT = Path(config.__file__).resolve().parent.parent
 
@@ -48,3 +48,17 @@ def test_missing_targets_config_fails_at_startup(monkeypatch, tmp_path):
 
     with pytest.raises(FileNotFoundError, match="none.toml"):
         load_settings()
+
+
+def test_comment_skill_is_used_when_placed_in_default_folder(tmp_path, monkeypatch):
+    monkeypatch.delenv("CLAUDE_COMMENT_SKILL_PATH", raising=False)
+    assert comment_skill_path(tmp_path) is None
+
+    default = tmp_path / "skills" / "comment-batch" / "SKILL.md"
+    default.parent.mkdir(parents=True)
+    default.write_text("# skill\n", encoding="utf-8")
+    assert comment_skill_path(tmp_path) == default
+
+    # .env での指定があれば、そちらを優先する
+    monkeypatch.setenv("CLAUDE_COMMENT_SKILL_PATH", str(tmp_path / "other" / "SKILL.md"))
+    assert comment_skill_path(tmp_path) == tmp_path / "other" / "SKILL.md"
