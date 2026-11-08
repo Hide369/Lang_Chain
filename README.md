@@ -43,7 +43,8 @@ generate の中身（ファイルごと）:
 | ファイル | 役割 |
 |---|---|
 | [godoc_agent/doc_graph.py](godoc_agent/doc_graph.py) | 1ファイル×1タスク分のグラフ（生成・検証・再試行） |
-| [godoc_agent/tasks.py](godoc_agent/tasks.py) | タスク（設計書・コメント追記）ごとのプロンプト・検証・出力先の定義 |
+| [godoc_agent/tasks.py](godoc_agent/tasks.py) | タスク（設計書・コメント追記・追加のスキル）ごとのプロンプト・検証・出力先の定義 |
+| [godoc_agent/skill_registry.py](godoc_agent/skill_registry.py) | 登録済みのスキル（組み込みの設計書・コメント追記と、skills/registry.json に登録した追加のスキル）の一覧 |
 | [godoc_agent/runner.py](godoc_agent/runner.py) | バッチ実行、並列数制御、差分スキップ、計測ログ |
 | [godoc_agent/claude_code.py](godoc_agent/claude_code.py) | `claude -p` の起動（呼び出しごとに新しいセッション）、Ollama への接続設定 |
 | [godoc_agent/prompts.py](godoc_agent/prompts.py) | SKILL.md の読み込みと、エージェントへの指示の組み立て |
@@ -199,6 +200,9 @@ python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --run-id nightl
 
 # タスクを選んで実行（省略時は doc と、コメント追記スキル（CLAUDE_COMMENT_SKILL_PATH または skills/comment-batch/SKILL.md）があれば comment も）
 python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --tasks comment
+
+# 追加で登録したスキル（skills/registry.json。Web 画面の「スキル」タブから登録できる）も名前で選べる
+python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --tasks doc,test-spec
 ```
 
 - `--limit` はファイル×タスクの件数で数える（両方のタスクを実行する場合、`--limit 5` は約2.5ファイル分）
@@ -211,9 +215,10 @@ python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --tasks comment
 GB10 上で Web 画面を常駐させると、クライアント PC のブラウザ（例：`http://192.168.31.26:4000`）から次のことができる。
 
 - 実行・停止と、進捗のログ・実行履歴・生成物（設計書・コメント追記済みファイル）の確認
-- スキル（SKILL.md と参照ファイル）の登録
+- スキル（SKILL.md と参照ファイル）の登録。設計書・コメント追記以外のスキルも、名前と出力の種類（文書・コメントだけ変更・コードも変更）を決めて追加できる
 - 対象フォルダ（`--repo`）と出力先フォルダ（`--out`）のダイアログでの選択
 - 対象の設定（targets.toml）の編集と、対象になるファイルのプレビュー
+- 毎日の定期実行（オン/オフ・時刻・タスク・実行前の git pull）の設定。systemd の夜間タイマーの代わりに使える
 
 閲覧は誰でもでき、実行と設定の変更は管理者パスワードでログインした人だけができる。
 同時に動く runner は1つだけになるよう、Web 画面・コマンド・夜間タイマーの間でも排他する（runner が出力先ごとにロックを取る）。
@@ -361,6 +366,8 @@ scp -r gb10:/opt/Lang_Chain/out ./design-docs
 または `--out /srv/repos/myapp/docs/design` のようにGoリポジトリ内へ出力し、サーバーでコミット・pushすれば、クライアントは `git pull` で受け取れる。
 
 ## 定期実行（systemd タイマー）
+
+> Web 画面を使う場合は、画面の「定期実行」で同じことができる（時刻などを画面から変えられる）。その場合はこのタイマーは設置しない（設置済みなら `sudo systemctl disable --now godoc-nightly.timer` で止める）。詳しくは [docs/web_ui.md](docs/web_ui.md) を参照。
 
 毎晩決まった時刻に、Goリポジトリを `git pull` してから設計書を生成する。変更のないファイルはスキップされるため、毎日実行しても処理されるのは変更されたファイルだけ。
 
