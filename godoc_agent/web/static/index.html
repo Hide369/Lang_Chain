@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>設計書生成</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='2' y='1' width='12' height='14' rx='2' fill='%232457c5'/%3E%3Cpath d='M5 5h6M5 8h6M5 11h4' stroke='white' stroke-width='1.4'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #667085; --border: #d9dee7;
+    --accent: #2457c5; --accent-text: #ffffff; --danger: #c0362c; --ok: #1f7a4d; --warn: #a45d00;
+    --code-bg: #0f1420; --code-text: #d7deea;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #11141a; --panel: #1a1f29; --text: #e4e8ef; --muted: #98a2b3; --border: #2c3442;
+      --accent: #6b98ff; --accent-text: #0b1020; --danger: #ff7b70; --ok: #5fd39a; --warn: #f0b45a;
+      --code-bg: #0b0e14; --code-text: #d7deea;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.6 system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+           padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border); }
+  header h1 { margin: 0; font-size: 17px; }
+  nav { display: flex; gap: 4px; }
+  nav button { border: none; background: none; padding: 6px 12px; border-radius: 6px; }
+  nav button[aria-selected=true] { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); font-weight: 600; }
+  .page { max-width: 1200px; margin: 0 auto; padding: 16px; display: grid; gap: 16px;
+          grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  @media (max-width: 900px) { .page { grid-template-columns: minmax(0, 1fr); } }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; min-width: 0; }
+  section.wide { grid-column: 1 / -1; }
+  h2 { margin: 0 0 10px; font-size: 15px; }
+  h3 { margin: 0 0 8px; font-size: 14px; }
+  label { display: inline-flex; align-items: center; gap: 6px; margin-right: 14px; }
+  .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 6px; margin-bottom: 10px; }
+  .row > .label { width: 92px; color: var(--muted); flex-shrink: 0; }
+  .path { flex: 1; min-width: 200px; padding: 5px 8px; border: 1px dashed var(--border); border-radius: 6px; }
+  input[type=password], input[type=number], input[type=search], input[type=text], select, textarea {
+    font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border);
+    border-radius: 6px; padding: 5px 8px; }
+  textarea { width: 100%; font: 12.5px/1.5 ui-monospace, Consolas, monospace; resize: vertical; }
+  input[type=number] { width: 100px; }
+  button { font: inherit; border: 1px solid var(--border); background: var(--bg); color: var(--text);
+           border-radius: 6px; padding: 5px 14px; cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  button.danger { color: var(--danger); border-color: var(--danger); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .muted { color: var(--muted); }
+  .small { font-size: 12.5px; }
+  .error { color: var(--danger); }
+  .success { color: var(--ok); }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; border: 1px solid currentColor; }
+  .badge.running { color: var(--accent); } .badge.ok { color: var(--ok); }
+  .badge.fail { color: var(--danger); } .badge.idle { color: var(--muted); } .badge.warn { color: var(--warn); }
+  pre { margin: 0; background: var(--code-bg); color: var(--code-text); border-radius: 6px; padding: 10px 12px;
+        overflow: auto; font: 12.5px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace; white-space: pre-wrap; word-break: break-all; }
+  #log { height: 340px; }
+  .viewer { max-height: 560px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: normal; font-size: 12px; }
+  .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; word-break: break-all; }
+  .scroll { max-height: 320px; overflow: auto; }
+  a { color: var(--accent); cursor: pointer; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  tr.selected td { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  .hidden { display: none !important; }
+  .lang { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
+  .lang.disabled .lang-body { opacity: .5; }
+  .grid3 { display: grid; gap: 10px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  @media (max-width: 900px) { .grid3 { grid-template-columns: minmax(0, 1fr); } }
+  dialog { border: 1px solid var(--border); border-radius: 10px; padding: 0; width: min(640px, calc(100vw - 32px));
+           background: var(--panel); color: var(--text); }
+  dialog::backdrop { background: rgb(0 0 0 / .35); }
+  .dlg-head, .dlg-foot { padding: 12px 16px; }
+  .dlg-head { border-bottom: 1px solid var(--border); }
+  .dlg-foot { border-top: 1px solid var(--border); display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; align-items: center; }
+  .dirs { height: 340px; overflow: auto; padding: 6px 8px; }
+  .dirs button { display: block; width: 100%; text-align: left; border: none; background: none; padding: 5px 8px; }
+  .dirs button:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  .note { border-left: 3px solid var(--warn); padding: 4px 10px; margin: 0 0 10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>設計書生成（GB10）</h1>
+  <nav id="tabs" class="hidden">
+    <button type="button" data-tab="run" aria-selected="true">実行</button>
+    <button type="button" data-tab="targets">対象の設定</button>
+    <button type="button" data-tab="skills" data-admin>スキル</button>
+  </nav>
+  <div id="auth">
+    <form id="login-form" class="row hidden" style="margin:0">
+      <!-- 管理者は1種類だけ。パスワードマネージャーが保存先を区別できるよう、固定のユーザー名を持たせる -->
+      <input type="text" name="username" value="admin" autocomplete="username" hidden>
+      <input id="password" type="password" placeholder="管理者パスワード" autocomplete="current-password" required>
+      <button class="primary" type="submit">ログイン</button>
+    </form>
+    <div id="logged-in" class="row hidden" style="margin:0">
+      <span class="badge ok">管理者</span>
+      <button id="logout" type="button">ログアウト</button>
+    </div>
+    <div id="auth-error" class="error"></div>
+  </div>
+</header>
+
+<div id="login-required" class="hidden" style="padding:32px 16px;text-align:center">
+  閲覧には管理者ログインが必要です。
+</div>
+
+<!-- 実行 -->
+<main id="tab-run" class="page hidden">
+  <section class="wide">
+    <h2>フォルダ</h2>
+    <p class="muted small admin-note" style="margin-top:0">フォルダの変更・実行・停止は管理者だけが行えます。右上からログインしてください。</p>
+    <div class="row">
+      <span class="label">対象フォルダ</span>
+      <span id="repo-path" class="path mono"></span>
+      <button type="button" data-pick="repo" data-admin>選択…</button>
+    </div>
+    <div class="row">
+      <span class="label">出力先</span>
+      <span id="out-path" class="path mono"></span>
+      <button type="button" data-pick="out" data-admin>選択…</button>
+    </div>
+    <div id="workspace-msg"></div>
+  </section>
+
+  <section>
+    <h2>実行</h2>
+    <form id="run-form">
+      <div class="row"><span class="label">タスク</span><span id="tasks"></span></div>
+      <div class="row">
+        <span class="label">件数の上限</span>
+        <input id="limit" type="number" min="0" value="0" data-admin> <span class="muted">0 = すべて</span>
+      </div>
+      <div class="row">
+        <span class="label">再生成</span>
+        <label><input id="force" type="checkbox" data-admin> 変更のないファイルも作り直す（版が上がります）</label>
+      </div>
+      <div class="row">
+        <span class="label"></span>
+        <button id="start" class="primary" type="submit">実行</button>
+        <button id="stop" class="danger" type="button">停止</button>
+      </div>
+      <div id="run-error" class="error"></div>
+    </form>
+  </section>
+
+  <section>
+    <h2>状態</h2>
+    <div id="status" class="row"></div>
+    <div class="row muted small mono" id="status-detail"></div>
+  </section>
+
+  <section class="wide">
+    <h2>ログ <span id="log-title" class="muted mono"></span></h2>
+    <pre id="log"></pre>
+  </section>
+
+  <section>
+    <h2>実行履歴</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>run_id</th><th>更新</th><th>結果</th></tr></thead>
+        <tbody id="history"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>生成物</h2>
+    <div class="row"><input id="filter" type="search" placeholder="パスで絞り込み" style="flex:1"></div>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>パス</th><th>更新</th></tr></thead>
+        <tbody id="outputs"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="wide hidden" id="viewer-section">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0" class="mono" id="viewer-title"></h2>
+      <a id="viewer-download">ダウンロード</a>
+    </div>
+    <pre id="viewer" class="viewer"></pre>
+  </section>
+</main>
+
+<!-- 対象の設定（targets.toml） -->
+<main id="tab-targets" class="page hidden">
+  <section class="wide">
+    <h2>対象の設定</h2>
+    <p class="muted small" style="margin-top:0">
+      処理する言語・フォルダ・ファイル・除外を決めます。保存先 <span id="targets-path" class="mono"></span>
+      （夜間バッチ・コマンドからの実行にも反映されます）。
+    </p>
+    <p id="targets-example-note" class="note small hidden">
+      いまは例の設定（targets.example.toml）が使われています。保存すると targets.toml が作られ、以後そちらが使われます。
+    </p>
+    <details class="small" style="margin-bottom:12px">
+      <summary>パターンの書き方</summary>
+      <table style="margin-top:6px">
+        <tr><td class="mono">*</td><td>/ を含まない任意の文字列（例: <span class="mono">*_test.go</span>）</td></tr>
+        <tr><td class="mono">?</td><td>/ 以外の1文字（例: <span class="mono">?*_api</span> … _api の前に1文字以上）</td></tr>
+        <tr><td class="mono">[abc] [!abc]</td><td>いずれか1文字・いずれでもない1文字</td></tr>
+        <tr><td class="mono">**/</td><td>0個以上のフォルダ（例: <span class="mono">**/vendor/**</span>）</td></tr>
+        <tr><td class="mono">/**（末尾）</td><td>そのフォルダの下のすべて（サブフォルダを含む）</td></tr>
+      </table>
+      <p class="muted">パターンは対象フォルダからの相対パス（/ 区切り）全体と照合します。除外は対象より優先されます。
+        \・先頭の /・.. は書けません。大文字と小文字は区別します。include は対象フォルダ名を先頭に付けたパスとも照合します。</p>
+    </details>
+    <h3>すべての言語に共通の除外 <span class="muted small">（1行に1つ）</span></h3>
+    <textarea id="global-exclude" rows="4" data-admin></textarea>
+  </section>
+
+  <section class="wide">
+    <h2>言語</h2>
+    <div id="languages"></div>
+    <div class="row">
+      <button id="targets-preview" type="button" data-admin>対象ファイルを確認</button>
+      <button id="targets-save" class="primary" type="button" data-admin>保存</button>
+      <button id="targets-reset" type="button">保存済みの内容に戻す</button>
+    </div>
+    <div id="targets-msg"></div>
+  </section>
+
+  <section class="wide hidden" id="preview-section">
+    <h2>対象ファイル <span id="preview-summary" class="muted small"></span></h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>パス</th><th>言語</th></tr></thead>
+        <tbody id="preview"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<!-- スキル -->
+<main id="tab-skills" class="page hidden">
+  <section class="wide">
+    <h2>スキル</h2>
+    <p class="muted small" style="margin:0">
+      SKILL.md のあるフォルダ（参照ファイルを含む）を選ぶと、まとめて登録します。SKILL.md だけを登録することもできます。
+      登録したスキルは、夜間バッチ・コマンドからの実行でも使われます。直前のスキルは1世代だけ残り、「直前に戻す」で戻せます。
+    </p>
+  </section>
+  <section id="skill-doc"></section>
+  <section id="skill-comment"></section>
+  <section class="wide hidden" id="skill-viewer-section">
+    <h2 id="skill-viewer-title"></h2>
+    <pre id="skill-viewer" class="viewer"></pre>
+  </section>
+</main>
+
+<!-- フォルダ選択ダイアログ -->
+<dialog id="folder-dialog">
+  <div class="dlg-head">
+    <h2 id="dlg-title" style="margin:0 0 6px"></h2>
+    <div class="row" style="margin:0">
+      <button id="dlg-up" type="button">↑ 上へ</button>
+      <span id="dlg-path" class="mono small" style="flex:1"></span>
+    </div>
+  </div>
+  <div id="dlg-dirs" class="dirs"></div>
+  <div class="dlg-foot">
+    <span id="dlg-error" class="error small" style="flex:1"></span>
+    <span id="dlg-new" class="hidden">
+      <input id="dlg-new-name" type="text" placeholder="新しいフォルダ名（任意）" style="width:200px">
+    </span>
+    <button id="dlg-cancel" type="button">キャンセル</button>
+    <button id="dlg-ok" class="primary" type="button">このフォルダを選択</button>
+  </div>
+</dialog>
+
+<script src="/app.js"></script>
+</body>
+</html>

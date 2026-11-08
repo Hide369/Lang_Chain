@@ -1,0 +1,19 @@
+[Unit]
+Description=設計書生成の Web 画面
+Wants=network-online.target ollama.service
+After=network-online.target ollama.service
+
+[Service]
+Type=simple
+# 設置時に実行ユーザーへ置き換える（夜間バッチと同じユーザーにすると、出力先・スキルの権限がそろう）
+User=REPLACE_WITH_USER
+WorkingDirectory=/opt/Lang_Chain
+# 設定（WEB_* など）は /opt/Lang_Chain/.env から読む
+ExecStart=/opt/Lang_Chain/.venv/bin/python -m godoc_agent.web
+Restart=on-failure
+RestartSec=5
+# 停止時、実行中の runner・claude も一緒に止める（完了済みのファイルは manifest に残る）
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

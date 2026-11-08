@@ -4,6 +4,10 @@ ollama==0.6.3
 httpx==0.28.1
 python-dotenv==1.2.4
 
+# Web 画面（godoc_agent.web）
+fastapi==0.162.2
+uvicorn==0.54.0
+
 # テスト
 pytest==9.2.0
 pytest-asyncio==1.4.1.post1
