@@ -40,6 +40,8 @@
 
 ## 2. 設置（初回だけ）
 
+すでに設計書の生成（コマンド・夜間タイマー）が動いているサーバーに追加する場合は、[migration_web_ui.md](migration_web_ui.md) の手順で行う（夜間タイマーからの切り替え・GitLab の認証・元に戻す方法を含む）。
+
 ```bash
 ssh gb10
 cd /opt/Lang_Chain
@@ -51,6 +53,9 @@ git pull
 #    （`>> .env` でリダイレクトしてもよい。入力の確認は画面に出る）
 
 # 2. 残りの設定を .env に追記する（値は環境に合わせる）
+#    CLAUDE_BIN は `which claude` のフルパスにしておく（systemd から起動すると PATH に ~/.local/bin が入らない）
+#    WEB_BROWSE_ROOTS に書くフォルダは先に作っておく（ないと起動しない）
+mkdir -p /opt/Lang_Chain/out
 cat >> .env <<'EOF'
 WEB_HOST=0.0.0.0
 WEB_PORT=4000
