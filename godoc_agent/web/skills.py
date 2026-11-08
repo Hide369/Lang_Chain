@@ -1,20 +1,31 @@
 """画面からのスキル（SKILL.md と参照ファイル一式）の登録。
 
 runner が読む場所にそのまま置くので、Web 画面以外（夜間バッチ・コマンド）からの実行でも同じスキルが使われる。
-  設計書     … CLAUDE_SKILL_PATH のフォルダ、未設定なら skills/design-doc-batch/
-  コメント追記 … CLAUDE_COMMENT_SKILL_PATH のフォルダ、未設定なら skills/comment-batch/
+  設計書（doc）       … CLAUDE_SKILL_PATH のフォルダ、未設定なら skills/design-doc-batch/
+  コメント追記（comment） … CLAUDE_COMMENT_SKILL_PATH のフォルダ、未設定なら skills/comment-batch/
+  追加のスキル          … skills/<スキル名>/。名前と出力の種類は skills/registry.json に記録する
 入れ替えは一時フォルダに書き終えてから差し替え、直前のスキルは <フォルダ名>.prev に1世代だけ残す。
 """
 
-import os
 import shutil
 import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 
-from ..config import COMMENT_SKILL_NAME, design_skill_path
-from ..tasks import COMMENT, DOC
+from ..skill_registry import (
+    COMMENT,
+    DOC,
+    OUTPUT_TYPE_LABELS,
+    OUTPUT_TYPES,
+    SkillDef,
+    custom_skill,
+    find_skill,
+    list_skills,
+    read_registry,
+    validate_name,
+    write_registry,
+)
 
 SKILL_FILE = "SKILL.md"
 MAX_FILES = 200
@@ -28,14 +39,6 @@ class SkillFile:
     content: bytes
 
 
-def skill_dirs(app_dir: Path) -> dict[str, Path]:
-    comment = os.getenv("CLAUDE_COMMENT_SKILL_PATH")
-    return {
-        DOC: design_skill_path(app_dir).parent,
-        COMMENT: Path(comment).parent if comment else app_dir / "skills" / COMMENT_SKILL_NAME,
-    }
-
-
 def _check_rel_path(raw: str) -> str:
     if not raw or "\\" in raw or raw.startswith("/") or "\x00" in raw:
         raise ValueError(f"ファイルのパスが正しくありません: {raw!r}")
@@ -46,75 +49,98 @@ def _check_rel_path(raw: str) -> str:
 
 
 class SkillStore:
-    def __init__(self, dirs: dict[str, Path]):
-        self.dirs = dirs
+    def __init__(self, app_dir: Path):
+        self.app_dir = app_dir
         self._lock = threading.Lock()
 
-    def _dir(self, kind: str) -> Path:
-        if kind not in self.dirs:
-            raise ValueError(f"スキルの種類が正しくありません: {kind!r}")
-        return self.dirs[kind]
+    # --- 参照 ---------------------------------------------------------------------------
 
-    def is_registered(self, kind: str) -> bool:
-        return (self._dir(kind) / SKILL_FILE).is_file()
+    def all(self) -> list[SkillDef]:
+        return list_skills(self.app_dir)
 
-    def info(self, kind: str) -> dict:
-        root = self._dir(kind)
-        skill = root / SKILL_FILE
+    def get(self, name: str) -> SkillDef:
+        return find_skill(self.app_dir, name)
+
+    def registered(self) -> list[SkillDef]:
+        """SKILL.md が置かれていて、実行に使えるスキル。"""
+        return [s for s in self.all() if s.registered]
+
+    def is_registered(self, name: str) -> bool:
+        return any(s.name == name for s in self.registered())
+
+    def info(self, skill: SkillDef) -> dict:
+        root = skill.skill_dir
         files = []
-        if skill.is_file():
+        if skill.registered:
             for path in (p for p in root.rglob("*") if p.is_file()):
                 files.append({"path": path.relative_to(root).as_posix(), "size": path.stat().st_size})
             # SKILL.md を先頭に、残りはパス順（OS によらず同じ順序にする）
             files.sort(key=lambda f: (f["path"] != SKILL_FILE, f["path"]))
         return {
-            "kind": kind,
+            "name": skill.name,
+            "label": skill.label,
+            "type": skill.output_type,
+            "type_label": OUTPUT_TYPE_LABELS[skill.output_type],
+            "builtin": skill.builtin,
+            "out_subdir": skill.out_subdir,
             "dir": str(root),
-            "registered": skill.is_file(),
-            "updated_at": datetime.fromtimestamp(skill.stat().st_mtime).isoformat(timespec="seconds") if skill.is_file() else None,
+            "registered": skill.registered,
+            "updated_at": (
+                datetime.fromtimestamp(skill.skill_path.stat().st_mtime).isoformat(timespec="seconds")
+                if skill.registered else None
+            ),
             "files": files,
             "has_backup": self._backup(root).is_dir(),
         }
 
-    def read_skill(self, kind: str) -> str:
-        path = self._dir(kind) / SKILL_FILE
+    def read_skill(self, name: str) -> str:
+        path = self.get(name).skill_path
         if not path.is_file():
-            raise FileNotFoundError(kind)
+            raise FileNotFoundError(name)
         return path.read_text(encoding="utf-8", errors="replace")
 
-    def install(self, kind: str, files: list[SkillFile]) -> dict:
-        root = self._dir(kind)
+    # --- 変更 ---------------------------------------------------------------------------
+
+    def install(self, name: str, files: list[SkillFile], output_type: str | None = None) -> dict:
+        """スキルを登録する（同じ名前があれば入れ替える）。追加のスキルは出力の種類も記録する。"""
         checked = self._validate(files)
         with self._lock:
-            root.parent.mkdir(parents=True, exist_ok=True)
-            staging = root.with_name(f"{root.name}.uploading")
-            shutil.rmtree(staging, ignore_errors=True)
-            try:
-                for rel, content in checked.items():
-                    dest = staging / rel
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    dest.write_bytes(content)
-                self._swap_in(root, staging)
-            finally:
-                shutil.rmtree(staging, ignore_errors=True)
-        return self.info(kind)
+            entries = read_registry(self.app_dir)
+            if name in (DOC, COMMENT):
+                skill = self.get(name)
+                if output_type not in (None, skill.output_type):
+                    raise ValueError(f"{skill.label}スキルの出力の種類は変えられません")
+            else:
+                validate_name(name)
+                output_type = output_type or entries.get(name)
+                if output_type not in OUTPUT_TYPES:
+                    raise ValueError("出力の種類（文書・コメントだけ変更・コードも変更）を選んでください")
+                skill = custom_skill(self.app_dir, name, output_type)
+            self._write_files(skill.skill_dir, checked)
+            if not skill.builtin and entries.get(name) != output_type:
+                write_registry(self.app_dir, {**entries, name: output_type})
+        return self.info(self.get(name))
 
-    def remove(self, kind: str) -> dict:
-        """登録を外す（直前のスキルとして .prev に残す）。設計書スキルは必須なので外せない。"""
-        if kind == DOC:
+    def remove(self, name: str) -> None:
+        """登録を外す（フォルダは .prev に移す）。設計書スキルは必須なので外せない。"""
+        if name == DOC:
             raise ValueError("設計書スキルは必須のため削除できません（新しいスキルを登録すると入れ替わります）")
-        root = self._dir(kind)
         with self._lock:
+            skill = self.get(name)
+            root = skill.skill_dir
             if root.is_dir():
                 backup = self._backup(root)
                 shutil.rmtree(backup, ignore_errors=True)
                 root.rename(backup)
-        return self.info(kind)
+            if not skill.builtin:
+                entries = read_registry(self.app_dir)
+                entries.pop(name, None)
+                write_registry(self.app_dir, entries)
 
-    def restore(self, kind: str) -> dict:
+    def restore(self, name: str) -> dict:
         """直前のスキル（.prev）に戻す。今のスキルは .prev に回る。"""
-        root = self._dir(kind)
         with self._lock:
+            root = self.get(name).skill_dir
             backup = self._backup(root)
             if not (backup / SKILL_FILE).is_file():
                 raise FileNotFoundError("戻せる直前のスキルがありません")
@@ -122,11 +148,26 @@ class SkillStore:
             shutil.rmtree(staging, ignore_errors=True)
             backup.rename(staging)
             self._swap_in(root, staging)
-        return self.info(kind)
+        return self.info(self.get(name))
+
+    # --- 内部 ---------------------------------------------------------------------------
 
     @staticmethod
     def _backup(root: Path) -> Path:
         return root.with_name(f"{root.name}.prev")
+
+    def _write_files(self, root: Path, checked: dict[str, bytes]) -> None:
+        root.parent.mkdir(parents=True, exist_ok=True)
+        staging = root.with_name(f"{root.name}.uploading")
+        shutil.rmtree(staging, ignore_errors=True)
+        try:
+            for rel, content in checked.items():
+                dest = staging / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(content)
+            self._swap_in(root, staging)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
 
     def _swap_in(self, root: Path, staging: Path) -> None:
         backup = self._backup(root)

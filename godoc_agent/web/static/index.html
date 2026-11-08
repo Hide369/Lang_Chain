@@ -82,6 +82,18 @@
   .dirs button { display: block; width: 100%; text-align: left; border: none; background: none; padding: 5px 8px; }
   .dirs button:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
   .note { border-left: 3px solid var(--warn); padding: 4px 10px; margin: 0 0 10px; }
+  /* スキルの複数選択プルダウン */
+  details.picker { position: relative; display: inline-block; min-width: 280px; max-width: 100%; }
+  .picker-summary { list-style: none; cursor: pointer; border: 1px solid var(--border); border-radius: 6px;
+                    padding: 5px 30px 5px 10px; background: var(--bg); position: relative; }
+  .picker-summary::-webkit-details-marker { display: none; }
+  .picker-summary::after { content: "▾"; position: absolute; right: 10px; top: 5px; color: var(--muted); }
+  .picker-menu { position: absolute; z-index: 20; top: calc(100% + 4px); left: 0; min-width: 100%; max-height: 280px; overflow: auto;
+                 background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 6px;
+                 box-shadow: 0 6px 20px rgb(0 0 0 / .15); }
+  .picker-menu label { display: flex; gap: 8px; align-items: center; margin: 0; padding: 4px 6px; border-radius: 4px; white-space: nowrap; }
+  .picker-menu label:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  .picker-menu label .small { margin-left: auto; padding-left: 12px; }
 </style>
 </head>
 <body>
@@ -129,10 +141,38 @@
     <div id="workspace-msg"></div>
   </section>
 
+  <section class="wide">
+    <h2>定期実行 <span id="schedule-badge"></span></h2>
+    <p class="muted small" style="margin-top:0">
+      毎日決まった時刻に、上のフォルダで実行します（サーバーの時刻）。Web 画面が止まっていて時刻を過ぎた場合は、起動後にその日の分を実行します。
+      実行時刻に別の実行が動いていれば、終わってから実行します。
+    </p>
+    <form id="schedule-form">
+      <div class="row">
+        <span class="label">定期実行</span>
+        <label><input id="schedule-enabled" type="checkbox" data-admin> 毎日実行する</label>
+        <span class="label" style="width:auto">時刻</span>
+        <input id="schedule-time" type="time" required data-admin>
+      </div>
+      <div class="row"><span class="label">スキル</span><div id="schedule-tasks"></div>
+        <span class="muted small">登録を外したスキルは実行時に除きます</span></div>
+      <div class="row">
+        <span class="label">ソース更新</span>
+        <label><input id="schedule-git-pull" type="checkbox" data-admin> 実行前に対象フォルダを git pull する（失敗したら生成しない）</label>
+      </div>
+      <div class="row">
+        <span class="label"></span>
+        <button id="schedule-save" class="primary" type="submit" data-admin>保存</button>
+        <span id="schedule-info" class="muted small"></span>
+      </div>
+      <div id="schedule-msg"></div>
+    </form>
+  </section>
+
   <section>
     <h2>実行</h2>
     <form id="run-form">
-      <div class="row"><span class="label">タスク</span><span id="tasks"></span></div>
+      <div class="row"><span class="label">スキル</span><div id="tasks"></div></div>
       <div class="row">
         <span class="label">件数の上限</span>
         <input id="limit" type="number" min="0" value="0" data-admin> <span class="muted">0 = すべて</span>
@@ -140,6 +180,10 @@
       <div class="row">
         <span class="label">再生成</span>
         <label><input id="force" type="checkbox" data-admin> 変更のないファイルも作り直す（版が上がります）</label>
+      </div>
+      <div class="row">
+        <span class="label">ソース更新</span>
+        <label><input id="git-pull" type="checkbox" data-admin> 実行前に対象フォルダを git pull する</label>
       </div>
       <div class="row">
         <span class="label"></span>
@@ -246,11 +290,11 @@
     <h2>スキル</h2>
     <p class="muted small" style="margin:0">
       SKILL.md のあるフォルダ（参照ファイルを含む）を選ぶと、まとめて登録します。SKILL.md だけを登録することもできます。
-      登録したスキルは、夜間バッチ・コマンドからの実行でも使われます。直前のスキルは1世代だけ残り、「直前に戻す」で戻せます。
+      登録したスキルは「実行」タブ・定期実行のプルダウンで選べます。コマンドからの実行でも <span class="mono">--tasks スキル名</span> で使えます。
+      直前のスキルは1世代だけ残り、「直前に戻す」で戻せます。
     </p>
   </section>
-  <section id="skill-doc"></section>
-  <section id="skill-comment"></section>
+  <div id="skill-list" style="display:contents"></div>
   <section class="wide hidden" id="skill-viewer-section">
     <h2 id="skill-viewer-title"></h2>
     <pre id="skill-viewer" class="viewer"></pre>

@@ -24,6 +24,18 @@ STOP_GRACE_S = 30
 # 1回に返すログの最大バイト数
 LOG_CHUNK_BYTES = 64 * 1024
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# 実行のきっかけ（run_id の先頭にも使う）
+MANUAL = "manual"
+SCHEDULED = "scheduled"
+_RUN_ID_PREFIX = {MANUAL: "web", SCHEDULED: "scheduled"}
+
+
+def _output_kind(rel: Path) -> str:
+    """生成物を出力したスキル名。設計書は --out 直下、それ以外は _<スキル名>（コメント追記は _commented）の下。"""
+    top = rel.parts[0]
+    if len(rel.parts) > 1 and top.startswith("_"):
+        return "comment" if top == "_commented" else top[1:]
+    return "doc"
 
 
 class JobBusy(RuntimeError):
@@ -41,6 +53,8 @@ class Job:
     started_at: str
     log_path: Path
     proc: subprocess.Popen
+    git_pull: bool = False
+    trigger: str = MANUAL
     stop_requested: bool = False
     finished_at: str | None = None
 
@@ -59,6 +73,8 @@ class Job:
             "tasks": self.tasks,
             "limit": self.limit,
             "force": self.force,
+            "git_pull": self.git_pull,
+            "trigger": self.trigger,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "running": exit_code is None,
@@ -90,7 +106,10 @@ class JobManager:
             "busy_elsewhere": not self.running and out_dir is not None and is_locked(out_dir),
         }
 
-    def start(self, repo: Path, out_dir: Path, tasks: list[str], limit: int, force: bool) -> Job:
+    def start(
+        self, repo: Path, out_dir: Path, tasks: list[str], limit: int, force: bool,
+        *, git_pull: bool = False, trigger: str = MANUAL,
+    ) -> Job:
         with self._lock:
             if self._job is not None and self._job.running:
                 raise JobBusy(f"実行中です（run_id={self._job.run_id}）。終了または停止してから実行してください")
@@ -99,7 +118,7 @@ class JobManager:
 
             runs_dir = out_dir / "_runs"
             runs_dir.mkdir(parents=True, exist_ok=True)
-            run_id = self._new_run_id(runs_dir)
+            run_id = self._new_run_id(runs_dir, _RUN_ID_PREFIX[trigger])
             log_path = runs_dir / f"{run_id}.log"
             cmd = [*self._runner_cmd, "--repo", str(repo), "--out", str(out_dir), "--run-id", run_id]
             if tasks:
@@ -108,9 +127,12 @@ class JobManager:
                 cmd += ["--limit", str(limit)]
             if force:
                 cmd.append("--force")
+            if git_pull:
+                # 古いソースから作らないよう、git pull に失敗したら runner を起動しない
+                cmd = [sys.executable, "-m", "godoc_agent.web.pull_and_run", str(repo), "--", *cmd]
 
             with log_path.open("ab") as log:
-                header = f"=== {datetime.now():%Y-%m-%d %H:%M:%S} start (web) repo={repo} out={out_dir}\n"
+                header = f"=== {datetime.now():%Y-%m-%d %H:%M:%S} start ({trigger}) repo={repo} out={out_dir}\n"
                 log.write(header.encode("utf-8"))
                 log.flush()
                 proc = subprocess.Popen(
@@ -126,6 +148,7 @@ class JobManager:
             self._job = Job(
                 run_id=run_id, repo=repo, out_dir=out_dir, tasks=tasks, limit=limit, force=force,
                 started_at=datetime.now().isoformat(timespec="seconds"), log_path=log_path, proc=proc,
+                git_pull=git_pull, trigger=trigger,
             )
             return self._job
 
@@ -157,8 +180,8 @@ class JobManager:
             pass  # すでに終了している
 
     @staticmethod
-    def _new_run_id(runs_dir: Path) -> str:
-        base = datetime.now().strftime("web-%Y%m%d-%H%M%S")
+    def _new_run_id(runs_dir: Path, prefix: str) -> str:
+        base = datetime.now().strftime(f"{prefix}-%Y%m%d-%H%M%S")
         run_id, n = base, 1
         while (runs_dir / f"{run_id}.log").exists() or (runs_dir / f"{run_id}.jsonl").exists():
             n += 1
@@ -237,7 +260,7 @@ class JobManager:
             stat = path.stat()
             items.append({
                 "path": rel.as_posix(),
-                "kind": "comment" if rel.parts[0] == "_commented" else "doc",
+                "kind": _output_kind(rel),
                 "size": stat.st_size,
                 "updated_at": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
             })

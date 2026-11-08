@@ -3,7 +3,6 @@
 // 状態を変える操作には、サーバー側の CSRF 対策と同じヘッダーを付ける
 const CSRF = { "X-Requested-With": "godoc-web" };
 const POLL_MS = 2000;
-const TASK_LABELS = { doc: "設計書", comment: "コメント追記" };
 const LANGUAGE_LABELS = { go: "Go", csharp: "C#", typescript: "TypeScript" };
 const $ = (id) => document.getElementById(id);
 
@@ -17,7 +16,12 @@ const state = {
   following: true,  // 実行中のジョブのログを追いかけるか（履歴を選ぶと止める）
   outputs: [],
   targets: null,    // サーバーから読んだ対象の設定
+  taskOptions: [],  // 実行に使える（登録済みの）スキル [{name, label, type}]
 };
+
+function taskLabel(name) {
+  return state.taskOptions.find((t) => t.name === name)?.label ?? name;
+}
 
 // --- 共通 ---------------------------------------------------------------------------------
 
@@ -203,32 +207,68 @@ function renderWorkspace() {
   $("out-path").textContent = state.workspace.out || "未設定";
 }
 
+// --- スキルの複数選択プルダウン --------------------------------------------------------------
+
+const TYPE_SHORT_LABELS = { document: "文書", comment: "コメント", rewrite: "コード変更" };
+
+// options: [{name, label, type, missing?}]。選んだスキル名は pickerValues() で取り出す
+function renderPicker(container, options, selected) {
+  const summary = el("summary", { className: "picker-summary" });
+  const menu = el("div", { className: "picker-menu" });
+  const update = () => {
+    const names = pickerValues(container);
+    summary.textContent = names.length ? names.map(taskLabel).join("、") : "スキルを選んでください";
+    summary.classList.toggle("muted", names.length === 0);
+  };
+  for (const opt of options) {
+    const input = el("input", { type: "checkbox", value: opt.name, checked: selected.includes(opt.name) });
+    input.dataset.admin = "";
+    input.addEventListener("change", update);
+    const type = opt.missing ? "未登録" : TYPE_SHORT_LABELS[opt.type] || opt.type;
+    menu.append(el("label", {}, input, el("span", { textContent: opt.label }),
+      el("span", { className: `muted small${opt.missing ? " error" : ""}`, textContent: type })));
+  }
+  if (options.length === 0) menu.append(el("div", { className: "muted small", textContent: "登録済みのスキルがありません（「スキル」タブから登録）" }));
+  container.replaceChildren(el("details", { className: "picker" }, summary, menu));
+  update();
+}
+
+function pickerValues(container) {
+  return [...container.querySelectorAll("input:checked")].map((i) => i.value);
+}
+
+// プルダウンの外をクリックしたら閉じる
+document.addEventListener("click", (e) => {
+  for (const open of document.querySelectorAll("details.picker[open]")) if (!open.contains(e.target)) open.open = false;
+});
+
 // --- 実行 ---------------------------------------------------------------------------------
 
 async function loadConfig() {
   const config = await api("/api/config");
   state.workspace = config.workspace;
+  state.taskOptions = config.tasks;
   renderWorkspace();
-  const checked = new Set([...$("tasks").querySelectorAll("input:checked")].map((i) => i.value));
-  const first = $("tasks").children.length === 0;
-  $("tasks").replaceChildren(...config.tasks.map((task) =>
-    el("label", {}, el("input", { type: "checkbox", value: task, checked: first || checked.has(task) }), TASK_LABELS[task] || task)));
-  if (!config.tasks.includes("comment")) {
-    $("tasks").append(el("span", { className: "muted small", textContent: "（コメント追記はスキル未登録）" }));
-  }
+  const names = config.tasks.map((t) => t.name);
+  const before = $("tasks").children.length ? pickerValues($("tasks")) : null;
+  // 初回は組み込みのスキル（設計書・コメント追記）を選んでおく。2回目以降は選択を引き継ぐ
+  const selected = (before ?? ["doc", "comment"]).filter((n) => names.includes(n));
+  renderPicker($("tasks"), config.tasks, selected);
 }
 
 $("run-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   $("run-error").textContent = "";
-  const tasks = [...$("tasks").querySelectorAll("input:checked")].map((i) => i.value);
+  const tasks = pickerValues($("tasks"));
   if (tasks.length === 0) {
-    $("run-error").textContent = "タスクを1つ以上選んでください";
+    $("run-error").textContent = "スキルを1つ以上選んでください";
     return;
   }
   if ($("force").checked && !confirm("変更のないファイルも作り直します（設計書の版が1つ上がります）。よろしいですか？")) return;
   try {
-    const job = await send("POST", "/api/runs", { tasks, limit: Number($("limit").value) || 0, force: $("force").checked });
+    const job = await send("POST", "/api/runs", {
+      tasks, limit: Number($("limit").value) || 0, force: $("force").checked, git_pull: $("git-pull").checked,
+    });
     followRun(job.run_id);
     await refreshStatus();
   } catch (err) {
@@ -244,6 +284,50 @@ $("stop").addEventListener("click", async () => {
     await refreshStatus();
   } catch (err) {
     $("run-error").textContent = err.message;
+  }
+});
+
+// --- 定期実行 -----------------------------------------------------------------------------
+
+async function loadSchedule() {
+  const schedule = await api("/api/schedule");
+  $("schedule-enabled").checked = schedule.enabled;
+  $("schedule-time").value = schedule.time;
+  $("schedule-git-pull").checked = schedule.git_pull;
+  // 保存済みの選択に、その後登録を外したスキルがあれば「未登録」として見せる（実行時には除かれる）
+  const missing = schedule.tasks.filter((n) => !state.taskOptions.some((t) => t.name === n))
+    .map((name) => ({ name, label: name, type: "", missing: true }));
+  renderPicker($("schedule-tasks"), [...state.taskOptions, ...missing], schedule.tasks);
+  renderScheduleInfo(schedule);
+  applyPermissions();
+}
+
+function renderScheduleInfo(schedule) {
+  $("schedule-badge").replaceChildren(schedule.enabled ? badge(`毎日 ${schedule.time}`, "ok") : badge("無効", "idle"));
+  const parts = [];
+  if (schedule.next_run_at) parts.push(`次回 ${fmtTime(schedule.next_run_at)}`);
+  const last = schedule.last_run;
+  if (last?.run_id) parts.push(`前回 ${last.run_id}`);
+  else if (last?.error) parts.push(`前回 ${fmtTime(last.at)} 開始できず: ${last.error}`);
+  $("schedule-info").textContent = parts.join(" / ");
+}
+
+$("schedule-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  $("schedule-msg").textContent = "";
+  const tasks = pickerValues($("schedule-tasks")).filter((n) => state.taskOptions.some((t) => t.name === n));
+  if (tasks.length === 0) {
+    message("schedule-msg", "登録済みのスキルを1つ以上選んでください");
+    return;
+  }
+  try {
+    const schedule = await send("PUT", "/api/schedule", {
+      enabled: $("schedule-enabled").checked, time: $("schedule-time").value, tasks, git_pull: $("schedule-git-pull").checked,
+    });
+    renderScheduleInfo(schedule);
+    message("schedule-msg", schedule.enabled ? `保存しました（次回 ${fmtTime(schedule.next_run_at)}）` : "保存しました（定期実行は無効）", true);
+  } catch (err) {
+    message("schedule-msg", err.message);
   }
 });
 
@@ -265,8 +349,8 @@ async function refreshStatus() {
   else status = badge("待機中", "idle");
   $("status").replaceChildren(status);
   $("status-detail").textContent = job
-    ? `run_id=${job.run_id} / ${job.tasks.map((t) => TASK_LABELS[t] || t).join("・") || "既定のタスク"}`
-      + `${job.limit ? ` / 上限 ${job.limit} 件` : ""}${job.force ? " / 再生成" : ""}`
+    ? `${job.trigger === "scheduled" ? "定期実行" : "手動"} / run_id=${job.run_id} / ${job.tasks.map(taskLabel).join("・") || "既定のタスク"}`
+      + `${job.limit ? ` / 上限 ${job.limit} 件` : ""}${job.force ? " / 再生成" : ""}${job.git_pull ? " / git pull" : ""}`
       + ` / 開始 ${fmtTime(job.started_at)}${job.finished_at ? ` / 終了 ${fmtTime(job.finished_at)}` : ""}`
       + `\n対象 ${job.repo}\n出力 ${job.out}`
     : "";
@@ -274,7 +358,6 @@ async function refreshStatus() {
 
   state.running = running;
   applyPermissions();
-  for (const input of $("tasks").querySelectorAll("input")) input.disabled = !state.admin;
   $("start").disabled = !state.admin || running || busyElsewhere;
   $("stop").disabled = !state.admin || !running || job.stop_requested;
 
@@ -468,7 +551,7 @@ async function fileToBase64(file) {
   return btoa(binary);
 }
 
-async function uploadSkill(kind, fileList, fromFolder) {
+async function uploadSkill(name, fileList, fromFolder, type = null) {
   const files = [];
   for (const file of fileList) {
     // フォルダを選ぶと「選んだフォルダ名/…」の形で届くので、先頭のフォルダ名を外す
@@ -476,61 +559,83 @@ async function uploadSkill(kind, fileList, fromFolder) {
     files.push({ path, content_b64: await fileToBase64(file) });
   }
   if (fromFolder && !files.some((f) => f.path === "SKILL.md")) throw new Error("選んだフォルダの直下に SKILL.md がありません");
-  return send("PUT", `/api/skills/${kind}`, { files });
+  return send("PUT", `/api/skills/${encodeURIComponent(name)}`, { files, type });
 }
 
-function renderSkill(info) {
-  const title = info.kind === "doc" ? "設計書スキル" : "コメント追記スキル";
-  const msg = el("div", { className: "small" });
-  const run = async (fn, okText) => {
-    msg.className = "small";
+function adminButton(text, onclick, cls = "") {
+  const b = el("button", { type: "button", textContent: text, onclick, className: cls });
+  b.dataset.admin = "";
+  return b;
+}
+
+// フォルダ選択・ファイル選択の隠し入力。選ぶと onFiles(files, fromFolder) を呼ぶ
+function filePickers(onFiles) {
+  // 同じフォルダを続けて選び直せるよう入力欄はすぐ空に戻す。input.files は空に戻すと中身も消えるため、先に配列へ写す
+  const handle = (input, fromFolder) => () => {
+    const files = [...input.files];
+    input.value = "";
+    if (files.length) onFiles(files, fromFolder);
+  };
+  const folderInput = el("input", { type: "file", multiple: true, className: "hidden" });
+  folderInput.webkitdirectory = true;
+  folderInput.addEventListener("change", handle(folderInput, true));
+  const fileInput = el("input", { type: "file", accept: ".md,text/markdown", className: "hidden" });
+  fileInput.addEventListener("change", handle(fileInput, false));
+  return { folderInput, fileInput };
+}
+
+// スキルの一覧を読み直し、実行・定期実行のプルダウンも更新する。完了メッセージは該当スキルの欄に出す
+async function afterSkillChange(name, okText) {
+  await loadSkills();
+  await loadConfig();
+  await loadSchedule();
+  const msg = document.querySelector(`[data-skill="${CSS.escape(name)}"] .skill-msg`) || $("new-skill-msg");
+  message(msg.id || (msg.id = `skill-msg-${name}`), okText, true);
+}
+
+function renderSkill(info, types) {
+  const section = el("section", {});
+  section.dataset.skill = info.name;
+  const msg = el("div", { className: "small skill-msg" });
+  const act = async (fn, okText) => {
+    msg.className = "small skill-msg";
     msg.textContent = "処理中…";
     try {
-      renderSkill(await fn());
-      await loadConfig();
-      const next = $(`skill-${info.kind}`).querySelector(".skill-msg");
-      next.className = "success small skill-msg";
-      next.textContent = okText;
+      await fn();
+      await afterSkillChange(info.name, okText);
     } catch (err) {
-      msg.className = "error small";
+      msg.className = "error small skill-msg";
       msg.textContent = err.message;
     }
   };
+  const { folderInput, fileInput } = filePickers((files, fromFolder) =>
+    act(() => uploadSkill(info.name, files, fromFolder), "登録しました"));
 
-  const folderInput = el("input", { type: "file", multiple: true, className: "hidden" });
-  folderInput.webkitdirectory = true;
-  folderInput.addEventListener("change", () => folderInput.files.length &&
-    run(() => uploadSkill(info.kind, folderInput.files, true), "登録しました"));
-  const fileInput = el("input", { type: "file", accept: ".md,text/markdown", className: "hidden" });
-  fileInput.addEventListener("change", () => fileInput.files.length &&
-    run(() => uploadSkill(info.kind, fileInput.files, false), "登録しました"));
-
-  const button = (text, onclick, cls = "") => {
-    const b = el("button", { type: "button", textContent: text, onclick, className: cls });
-    b.dataset.admin = "";
-    return b;
-  };
   const buttons = [
-    button("フォルダを選んで登録", () => folderInput.click(), "primary"),
-    button("SKILL.md だけ登録", () => fileInput.click()),
+    adminButton("フォルダを選んで登録", () => folderInput.click(), "primary"),
+    adminButton("SKILL.md だけ登録", () => fileInput.click()),
   ];
-  if (info.registered) buttons.push(button("内容を見る", () => viewSkill(info.kind, title)));
+  if (info.registered) buttons.push(adminButton("内容を見る", () => viewSkill(info.name, info.label)));
   if (info.has_backup) {
-    buttons.push(button("直前に戻す", () => confirm("直前に登録されていたスキルに戻しますか？")
-      && run(() => send("POST", `/api/skills/${info.kind}/restore`), "直前のスキルに戻しました")));
+    buttons.push(adminButton("直前に戻す", () => confirm("直前に登録されていたスキルに戻しますか？")
+      && act(() => send("POST", `/api/skills/${encodeURIComponent(info.name)}/restore`), "直前のスキルに戻しました")));
   }
-  if (info.kind === "comment" && info.registered) {
-    buttons.push(button("登録を外す", () => confirm("コメント追記スキルの登録を外しますか？（コメント追記は実行されなくなります）")
-      && run(() => send("DELETE", "/api/skills/comment"), "登録を外しました"), "danger"));
+  if (info.name !== "doc" && info.registered) {
+    const note = info.builtin ? "（コメント追記は実行されなくなります）" : "（「スキル」の一覧からも消えます。フォルダは .prev に残ります）";
+    buttons.push(adminButton("登録を外す", () => confirm(`「${info.label}」の登録を外しますか？${note}`)
+      && act(() => send("DELETE", `/api/skills/${encodeURIComponent(info.name)}`), "登録を外しました"), "danger"));
   }
-  msg.classList.add("skill-msg");
 
-  $(`skill-${info.kind}`).replaceChildren(...[
-    el("h2", { textContent: title }),
-    el("div", { className: "row" },
-      info.registered ? badge("登録済み", "ok") : badge(info.kind === "doc" ? "未登録（実行できません）" : "未登録（コメント追記は行いません）", info.kind === "doc" ? "fail" : "idle"),
+  const status = info.registered
+    ? badge("登録済み", "ok")
+    : badge(info.name === "doc" ? "未登録（設計書は実行できません）" : "未登録", info.name === "doc" ? "fail" : "idle");
+  const outDir = info.out_subdir ? `<出力先>/${info.out_subdir}/` : "<出力先>/ 直下";
+  section.append(...[
+    el("h2", {}, info.label, el("span", { className: "muted small mono", textContent: `  ${info.name}` })),
+    el("div", { className: "row" }, status, el("span", { className: "badge idle", textContent: info.type_label }),
       info.updated_at ? el("span", { className: "muted small", textContent: `更新 ${fmtTime(info.updated_at)}` }) : null),
-    el("div", { className: "muted small mono", textContent: info.dir, style: "margin-bottom:8px" }),
+    el("div", { className: "muted small mono", textContent: `スキル: ${info.dir}` }),
+    el("div", { className: "muted small mono", textContent: `出力: ${outDir}`, style: "margin-bottom:8px" }),
     info.files.length ? el("div", { className: "scroll", style: "max-height:160px;margin-bottom:10px" },
       el("table", {}, el("tbody", {}, ...info.files.map((f) => el("tr", {},
         el("td", { className: "mono", textContent: f.path }),
@@ -538,24 +643,70 @@ function renderSkill(info) {
     el("div", { className: "row" }, ...buttons, folderInput, fileInput),
     msg,
   ].filter(Boolean));
-  applyPermissions();
+  return section;
+}
+
+function renderNewSkill(types) {
+  const name = el("input", { type: "text", placeholder: "例: test-spec", maxLength: 40, style: "width:200px" });
+  name.dataset.admin = "";
+  const type = el("select", {}, el("option", { value: "", textContent: "出力の種類を選択" }),
+    ...types.map((t) => el("option", { value: t.type, textContent: t.label })));
+  type.dataset.admin = "";
+  const msg = el("div", { id: "new-skill-msg", className: "small" });
+  const check = () => {
+    if (!/^[a-z0-9][a-z0-9_-]{0,39}$/.test(name.value)) throw new Error("スキル名は英小文字・数字・-・_ で、英小文字か数字で始めてください");
+    if (!type.value) throw new Error("出力の種類を選んでください");
+  };
+  const add = async (files, fromFolder) => {
+    try {
+      msg.className = "small";
+      msg.textContent = "処理中…";
+      await uploadSkill(name.value, files, fromFolder, type.value);
+      const added = name.value;
+      name.value = "";
+      type.value = "";
+      await afterSkillChange(added, "追加しました");
+    } catch (err) {
+      message("new-skill-msg", err.message);
+    }
+  };
+  const { folderInput, fileInput } = filePickers(add);
+  const pick = (input) => () => {
+    try { check(); input.click(); } catch (err) { message("new-skill-msg", err.message); }
+  };
+  return el("section", { className: "wide" },
+    el("h2", { textContent: "スキルを追加" }),
+    el("p", { className: "muted small", style: "margin-top:0",
+      textContent: "名前は実行時に選ぶ名前と、出力先のフォルダ名（<出力先>/_<名前>/）になります。"
+        + "文書: ファイルごとに Markdown を作り、前回の出力を引き継いで改訂させます。"
+        + "コメントだけ変更: コメント以外のコードが変わっていたら不合格にします。"
+        + "コードも変更: 本文が空でないことだけを確かめます（取り込むかどうかは差分を見て判断してください）。" }),
+    el("div", { className: "row" },
+      el("span", { className: "label", textContent: "スキル名" }), name,
+      el("span", { className: "label", textContent: "出力の種類", style: "width:auto" }), type),
+    el("div", { className: "row" },
+      el("span", { className: "label" }),
+      adminButton("フォルダを選んで追加", pick(folderInput), "primary"),
+      adminButton("SKILL.md だけで追加", pick(fileInput)), folderInput, fileInput),
+    msg);
 }
 
 async function loadSkills() {
   try {
-    const list = await api("/api/skills");
-    for (const info of list) renderSkill(info);
+    const { skills, types } = await api("/api/skills");
+    $("skill-list").replaceChildren(...skills.map((info) => renderSkill(info, types)), renderNewSkill(types));
+    applyPermissions();
   } catch (err) {
-    $("skill-doc").textContent = err.message;
+    $("skill-list").replaceChildren(el("section", { className: "wide error", textContent: err.message }));
   }
 }
 
-async function viewSkill(kind, title) {
+async function viewSkill(name, title) {
   $("skill-viewer-title").textContent = `${title}（SKILL.md）`;
   $("skill-viewer").textContent = "読み込み中…";
   $("skill-viewer-section").classList.remove("hidden");
   try {
-    $("skill-viewer").textContent = await api(`/api/skills/${kind}/content`);
+    $("skill-viewer").textContent = await api(`/api/skills/${encodeURIComponent(name)}/content`);
   } catch (err) {
     $("skill-viewer").textContent = err.message;
   }
@@ -564,17 +715,22 @@ async function viewSkill(kind, title) {
 
 // --- 起動・定期更新 --------------------------------------------------------------------------
 
-let wasRunning = false;
+let lastJobKey = null;
 let timer = null;
 
 async function tick() {
   try {
     const job = await refreshStatus();
     await pollLog();
-    const running = job?.running ?? false;
-    // 実行が終わったら、履歴と生成物を読み直す
-    if (wasRunning && !running) await Promise.all([refreshHistory(), refreshOutputs()]);
-    wasRunning = running;
+    // ジョブが変わった（定期実行が始まった）・終わったら、履歴・生成物・定期実行の次回予定を読み直す。
+    // 短い実行は確認の間に始まって終わることがあるため、「実行中→終了」ではなく run_id と状態の変化で判断する。
+    // 定期実行の入力欄は、入力中の内容を消さないよう書き換えない
+    const jobKey = job ? `${job.run_id}:${job.running}` : "";
+    if (jobKey !== lastJobKey) {
+      await Promise.all([refreshHistory(), refreshOutputs()]);
+      renderScheduleInfo(await api("/api/schedule"));
+      lastJobKey = jobKey;
+    }
   } catch (err) {
     if (err.status === 401) await start();
   }
@@ -584,7 +740,7 @@ async function start() {
   clearInterval(timer);
   if (!(await refreshMe())) return;
   await loadConfig();
-  await Promise.all([refreshHistory(), refreshOutputs()]);
+  await Promise.all([refreshHistory(), refreshOutputs(), loadSchedule()]);
   await tick();
   timer = setInterval(tick, POLL_MS);
 }
