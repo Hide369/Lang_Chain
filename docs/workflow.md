@@ -34,7 +34,7 @@ flowchart TD
 3. 今日の日付を**1回だけ**取得する（日付をまたいでも同じ実行の出力は同じ日付になる）
 4. 実行するタスクを決める
    - `--tasks` 指定があればそれ
-   - 省略時は `doc`、加えて `CLAUDE_COMMENT_SKILL_PATH` があれば `comment`
+   - 省略時は `doc`、加えてコメント追記スキル（`CLAUDE_COMMENT_SKILL_PATH` または `skills/comment-batch/SKILL.md`）があれば `comment`
 5. タスクごとに SKILL.md を読み込み、`claude` コマンドの存在を確認し、manifest（差分記録）を開く
 
 ここで失敗した場合（SKILL.md がない、`claude` が見つからない等）は `エラー: ...` を表示して終了コード `2` で終わる。
