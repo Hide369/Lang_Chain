@@ -31,6 +31,17 @@ def _ratio_env(name: str, default: float) -> float:
 
 # 設計書スキルはすべての言語で共通。置き場所を固定し、.env での指定を不要にする
 DESIGN_SKILL_NAME = "design-doc-batch"
+# コメント追記スキルの既定の置き場所。ここに SKILL.md があれば、.env で指定しなくてもコメント追記を実行する
+# （Web 画面から登録したスキルを、夜間バッチやコマンドからの実行でも同じように使うため）
+COMMENT_SKILL_NAME = "comment-batch"
+
+
+def comment_skill_path(base_dir: Path) -> Path | None:
+    """コメント追記スキル。CLAUDE_COMMENT_SKILL_PATH > skills/comment-batch/SKILL.md（あれば）の順に使う。"""
+    if raw := os.getenv("CLAUDE_COMMENT_SKILL_PATH"):
+        return Path(raw)
+    default = base_dir / "skills" / COMMENT_SKILL_NAME / "SKILL.md"
+    return default if default.is_file() else None
 
 
 def targets_config_path(base_dir: Path) -> Path:
@@ -77,8 +88,16 @@ class Settings:
         return self.num_ctx * self.ctx_warn_ratio
 
 
+APP_DIR = Path(__file__).resolve().parent.parent
+
+
+def design_skill_path(base_dir: Path) -> Path:
+    """設計書スキル。CLAUDE_SKILL_PATH > skills/design-doc-batch/SKILL.md の順に使う。"""
+    return Path(os.getenv("CLAUDE_SKILL_PATH") or base_dir / "skills" / DESIGN_SKILL_NAME / "SKILL.md")
+
+
 def load_settings() -> Settings:
-    base_dir = Path(__file__).resolve().parent.parent
+    base_dir = APP_DIR
     return Settings(
         ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
         model=os.getenv("LLM_MODEL", "qwen3-coder-next"),
@@ -88,10 +107,8 @@ def load_settings() -> Settings:
         concurrency=_int_env("LLM_CONCURRENCY", 2),
         max_attempts=_int_env("DOC_MAX_ATTEMPTS", 3),
         claude_bin=os.getenv("CLAUDE_BIN", "claude"),
-        claude_skill_path=Path(
-            os.getenv("CLAUDE_SKILL_PATH") or base_dir / "skills" / DESIGN_SKILL_NAME / "SKILL.md"
-        ),
-        claude_comment_skill_path=Path(skill) if (skill := os.getenv("CLAUDE_COMMENT_SKILL_PATH")) else None,
+        claude_skill_path=design_skill_path(base_dir),
+        claude_comment_skill_path=comment_skill_path(base_dir),
         claude_max_turns=_int_env("CLAUDE_MAX_TURNS", 30),
         # エージェントはファイルを読みながら複数回LLMを呼ぶため、長めに取る
         claude_timeout_s=_int_env("CLAUDE_TIMEOUT_S", 1800),

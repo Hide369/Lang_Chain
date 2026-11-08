@@ -5,3 +5,6 @@ __pycache__/
 targets.toml
 state/
 out/
+.playwright-mcp/
+# Web 画面から登録したスキル（サーバーごとの内容のためコミットしない）
+skills/

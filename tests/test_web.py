@@ -1,0 +1,509 @@
+import base64
+import shutil
+import sys
+import tomllib
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+from godoc_agent.runlock import run_lock
+from godoc_agent.tasks import COMMENT, DOC
+from godoc_agent.web.app import CSRF_HEADER, CSRF_VALUE, create_app
+from godoc_agent.web.auth import LoginThrottle, hash_password, verify_password
+from godoc_agent.web.jobs import JobManager
+from godoc_agent.web.settings import WebSettings, parse_browse_roots
+from godoc_agent.web.skills import SkillStore
+from godoc_agent.web.targets_editor import to_toml
+
+PASSWORD = "correct horse battery staple"
+FAKE_RUNNER = Path(__file__).resolve().parent / "fake_runner.py"
+EXAMPLE_TARGETS = Path(__file__).resolve().parent.parent / "targets.example.toml"
+CSRF = {CSRF_HEADER: CSRF_VALUE}
+
+
+@pytest.fixture(scope="module")
+def password_hash() -> str:
+    # テストを速くするため、計算量を下げたハッシュを使う
+    return hash_password(PASSWORD, n=2**10)
+
+
+@pytest.fixture
+def root(tmp_path: Path) -> Path:
+    """フォルダ選択の起点。対象・出力先はこの下に作る。"""
+    path = tmp_path / "root"
+    path.mkdir()
+    return path
+
+
+@pytest.fixture
+def repo_dir(root: Path) -> Path:
+    path = root / "repos" / "user_api"
+    for rel in ("pkg/handler/user.go", "pkg/handler/user_test.go", "pkg/model/user.go"):
+        (path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (path / rel).write_text("package x\n", encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def out_dir(root: Path) -> Path:
+    return root / "out"
+
+
+@pytest.fixture
+def app_dir(tmp_path: Path, monkeypatch) -> Path:
+    path = tmp_path / "app"
+    path.mkdir()
+    shutil.copy(EXAMPLE_TARGETS, path / "targets.example.toml")
+    monkeypatch.delenv("TARGETS_CONFIG", raising=False)
+    return path
+
+
+@pytest.fixture
+def skills(app_dir: Path) -> SkillStore:
+    store = SkillStore({DOC: app_dir / "skills" / "design-doc-batch", COMMENT: app_dir / "skills" / "comment-batch"})
+    skill = store.dirs[DOC] / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# 設計書スキル\n", encoding="utf-8")
+    return store
+
+
+@pytest.fixture
+def jobs(monkeypatch) -> JobManager:
+    monkeypatch.setenv("FAKE_RUNNER_SLEEP", "0")
+    monkeypatch.delenv("FAKE_RUNNER_EXIT", raising=False)
+    manager = JobManager(runner_cmd=[sys.executable, str(FAKE_RUNNER)])
+    yield manager
+    if manager.running:
+        manager.current.proc.kill()
+        manager.current.proc.wait(timeout=10)
+
+
+def make_settings(password_hash: str, root: Path, state_dir: Path, **overrides) -> WebSettings:
+    values = dict(
+        admin_password_hash=password_hash, browse_roots=(root.resolve(),), state_dir=state_dir,
+        host="127.0.0.1", port=4000, session_ttl_s=3600, cookie_secure=False, view_requires_login=False,
+    )
+    values.update(overrides)
+    return WebSettings(**values)
+
+
+@pytest.fixture
+def make_client(password_hash, root, tmp_path, jobs, app_dir, skills):
+    def make(throttle: LoginThrottle | None = None, **overrides) -> TestClient:
+        settings = make_settings(password_hash, root, tmp_path / "state", **overrides)
+        return TestClient(create_app(settings, jobs, throttle, app_dir=app_dir, skills=skills))
+
+    return make
+
+
+@pytest.fixture
+def client(make_client) -> TestClient:
+    return make_client()
+
+
+def login(client: TestClient, password: str = PASSWORD):
+    return client.post("/api/login", json={"password": password}, headers=CSRF)
+
+
+def set_workspace(client: TestClient, repo: Path, out: Path):
+    return client.put("/api/workspace", json={"repo": str(repo), "out": str(out)}, headers=CSRF)
+
+
+@pytest.fixture
+def admin(client, repo_dir, out_dir) -> TestClient:
+    """ログイン済みで、対象・出力先フォルダを設定した状態。"""
+    assert login(client).status_code == 200
+    assert set_workspace(client, repo_dir, out_dir).status_code == 200
+    return client
+
+
+def start_run(client: TestClient, **body):
+    return client.post("/api/runs", json={"tasks": ["doc"], **body}, headers=CSRF)
+
+
+def wait_finished(jobs: JobManager) -> None:
+    jobs.current.proc.wait(timeout=20)
+
+
+def b64(text: str) -> str:
+    return base64.b64encode(text.encode("utf-8")).decode("ascii")
+
+
+# --- ログイン ------------------------------------------------------------------------------
+
+
+def test_password_hash_roundtrip(password_hash):
+    assert verify_password(PASSWORD, password_hash)
+    assert not verify_password("wrong", password_hash)
+    assert not verify_password(PASSWORD, "scrypt:broken")
+
+
+def test_server_refuses_to_start_with_malformed_password_hash(root, tmp_path):
+    with pytest.raises(ValueError, match="WEB_ADMIN_PASSWORD_HASH"):
+        create_app(make_settings("plain-text-password", root, tmp_path / "state"))
+
+
+def test_login_and_logout(client):
+    assert client.get("/api/me").json()["admin"] is False
+    assert login(client, "wrong").status_code == 401
+    assert login(client).status_code == 200
+    assert client.get("/api/me").json()["admin"] is True
+    assert client.post("/api/logout", headers=CSRF).status_code == 200
+    assert client.get("/api/me").json()["admin"] is False
+
+
+def test_login_is_locked_after_repeated_failures(make_client):
+    client = make_client(LoginThrottle(max_failures=3))
+    for _ in range(3):
+        assert login(client, "wrong").status_code == 401
+    # ロック中は正しいパスワードでも受け付けない
+    assert login(client).status_code == 429
+
+
+def test_state_changing_requests_require_csrf_header(client, repo_dir, out_dir):
+    assert client.post("/api/login", json={"password": PASSWORD}).status_code == 403
+    login(client)
+    assert client.put("/api/workspace", json={"repo": str(repo_dir), "out": str(out_dir)}).status_code == 403
+    assert client.post("/api/runs", json={}).status_code == 403
+
+
+def test_view_can_require_login(make_client):
+    client = make_client(view_requires_login=True)
+    assert client.get("/api/status").status_code == 401
+    assert client.get("/api/outputs").status_code == 401
+    login(client)
+    assert client.get("/api/status").status_code == 200
+
+
+# --- 管理者だけの操作 ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "method, path",
+    [
+        ("post", "/api/runs"), ("post", "/api/runs/stop"), ("put", "/api/workspace"), ("get", "/api/fs"),
+        ("get", "/api/skills"), ("put", "/api/skills/doc"), ("delete", "/api/skills/comment"),
+        ("put", "/api/targets"), ("post", "/api/targets/preview"),
+    ],
+)
+def test_admin_only_endpoints_reject_viewers(client, method, path):
+    res = getattr(client, method)(path, headers=CSRF) if method in ("get", "delete") else getattr(client, method)(path, json={}, headers=CSRF)
+    assert res.status_code == 401
+
+
+def test_viewer_can_see_status_config_and_targets(client):
+    assert client.get("/api/status").status_code == 200
+    assert client.get("/api/config").json() == {"tasks": ["doc"], "workspace": {"repo": None, "out": None}}
+    assert client.get("/api/targets").status_code == 200
+
+
+# --- フォルダ ------------------------------------------------------------------------------
+
+
+def test_browse_lists_folders_only_within_roots(client, root, repo_dir, tmp_path):
+    login(client)
+    top = client.get("/api/fs").json()
+    assert [d["path"] for d in top["dirs"]] == [str(root.resolve())]
+    res = client.get("/api/fs", params={"path": str(repo_dir)}).json()
+    assert [d["name"] for d in res["dirs"]] == ["pkg"]
+    assert res["parent"] == str(repo_dir.parent.resolve())
+    # 起点で「上へ」を押すと起点の一覧に戻る
+    assert client.get("/api/fs", params={"path": str(root)}).json()["parent"] is None
+    assert client.get("/api/fs", params={"path": str(tmp_path)}).status_code == 403
+    assert client.get("/api/fs", params={"path": str(root / ".." / "app")}).status_code == 403
+
+
+def test_workspace_is_saved_and_validated(client, root, repo_dir, out_dir, tmp_path):
+    login(client)
+    res = set_workspace(client, repo_dir, out_dir)
+    assert res.status_code == 200
+    assert client.get("/api/config").json()["workspace"] == {"repo": str(repo_dir.resolve()), "out": str(out_dir.resolve())}
+
+    assert set_workspace(client, tmp_path, out_dir).status_code == 400            # 起点の外
+    assert set_workspace(client, root / "missing", out_dir).status_code == 400    # 対象がない
+    assert set_workspace(client, repo_dir, repo_dir / "out").status_code == 400   # 出力先が対象の中
+    assert set_workspace(client, repo_dir, root / "a" / "b").status_code == 400   # 出力先の親がない
+    # 失敗しても保存済みの値は変わらない
+    assert client.get("/api/config").json()["workspace"]["repo"] == str(repo_dir.resolve())
+
+
+# --- 実行 --------------------------------------------------------------------------------
+
+
+def test_admin_runs_runner_on_selected_folders(admin, jobs, out_dir, repo_dir):
+    res = start_run(admin, limit=3, force=True)
+    assert res.status_code == 202
+    run_id = res.json()["run_id"]
+    assert run_id.startswith("web-")
+    wait_finished(jobs)
+
+    status = admin.get("/api/status").json()
+    assert status["job"]["running"] is False
+    assert status["job"]["exit_code"] == 0
+
+    log = admin.get(f"/api/runs/{run_id}/log").json()
+    assert log["eof"] is True
+    assert "処理中: 日本語の出力" in log["text"]
+    # 画面で選んだフォルダと指定が runner の引数として渡る
+    args_line = next(line for line in log["text"].splitlines() if line.startswith("args:"))
+    assert f"--repo {repo_dir.resolve()}" in args_line
+    assert f"--out {out_dir.resolve()}" in args_line
+    assert f"--run-id {run_id}" in args_line
+    assert "--tasks doc --limit 3 --force" in args_line
+
+    # 続きから読むと、新しい内容はない
+    assert admin.get(f"/api/runs/{run_id}/log", params={"offset": log["offset"]}).json()["text"] == ""
+    assert [r["run_id"] for r in admin.get("/api/runs").json()] == [run_id]
+
+
+def test_run_requires_folders_and_design_skill(client, skills, repo_dir, out_dir):
+    login(client)
+    res = start_run(client)
+    assert res.status_code == 400
+    assert "フォルダ" in res.json()["detail"]
+
+    set_workspace(client, repo_dir, out_dir)
+    (skills.dirs[DOC] / "SKILL.md").unlink()
+    res = start_run(client)
+    assert res.status_code == 400
+    assert "設計書スキル" in res.json()["detail"]
+
+
+def test_comment_task_needs_registered_skill(admin):
+    res = start_run(admin, tasks=["comment"])
+    assert res.status_code == 400
+    assert "スキル未登録" in res.json()["detail"]
+
+
+def test_second_run_is_rejected_while_running(admin, monkeypatch):
+    monkeypatch.setenv("FAKE_RUNNER_SLEEP", "30")
+    assert start_run(admin).status_code == 202
+    res = start_run(admin)
+    assert res.status_code == 409
+    assert "実行中" in res.json()["detail"]
+
+
+def test_settings_cannot_change_while_running(admin, repo_dir, out_dir, monkeypatch):
+    monkeypatch.setenv("FAKE_RUNNER_SLEEP", "30")
+    start_run(admin)
+    assert set_workspace(admin, repo_dir, out_dir).status_code == 409
+    assert admin.put("/api/skills/comment", json={"files": [{"path": "SKILL.md", "content_b64": b64("x")}]}, headers=CSRF).status_code == 409
+    assert admin.put("/api/targets", json={"config": {}}, headers=CSRF).status_code == 409
+
+
+def test_stop_terminates_running_job(admin, jobs, monkeypatch):
+    monkeypatch.setenv("FAKE_RUNNER_SLEEP", "30")
+    start_run(admin)
+    res = admin.post("/api/runs/stop", headers=CSRF)
+    assert res.status_code == 200
+    assert res.json()["stop_requested"] is True
+    wait_finished(jobs)
+    job = admin.get("/api/status").json()["job"]
+    assert job["running"] is False
+    assert job["exit_code"] != 0
+    # 止めた後は、すぐに次の実行を受け付ける
+    monkeypatch.setenv("FAKE_RUNNER_SLEEP", "0")
+    assert start_run(admin).status_code == 202
+
+
+def test_run_is_rejected_while_nightly_or_cli_run_holds_the_lock(admin, out_dir):
+    with run_lock(out_dir.resolve()):
+        assert admin.get("/api/status").json()["busy_elsewhere"] is True
+        res = start_run(admin)
+        assert res.status_code == 409
+        assert "夜間バッチ" in res.json()["detail"]
+    assert admin.get("/api/status").json()["busy_elsewhere"] is False
+
+
+def test_failed_run_reports_exit_code(admin, jobs, monkeypatch):
+    monkeypatch.setenv("FAKE_RUNNER_EXIT", "1")
+    start_run(admin)
+    wait_finished(jobs)
+    assert admin.get("/api/status").json()["job"]["exit_code"] == 1
+
+
+@pytest.mark.parametrize("body", [{"tasks": ["unknown"]}, {"limit": -1}])
+def test_invalid_run_requests_are_rejected(admin, body):
+    assert admin.post("/api/runs", json=body, headers=CSRF).status_code in (400, 422)
+
+
+# --- スキル -------------------------------------------------------------------------------
+
+
+def test_register_skill_folder_and_enable_comment_task(admin, skills):
+    files = [
+        {"path": "SKILL.md", "content_b64": b64("# コメント追記\n")},
+        {"path": "references/rules.md", "content_b64": b64("ルール\n")},
+    ]
+    res = admin.put("/api/skills/comment", json={"files": files}, headers=CSRF)
+    assert res.status_code == 200
+    assert [f["path"] for f in res.json()["files"]] == ["SKILL.md", "references/rules.md"]
+    assert (skills.dirs[COMMENT] / "references" / "rules.md").read_text(encoding="utf-8") == "ルール\n"
+    assert admin.get("/api/skills/comment/content").text == "# コメント追記\n"
+    # 登録するとコメント追記を選べるようになる
+    assert admin.get("/api/config").json()["tasks"] == ["doc", "comment"]
+
+    # 登録を外すと選べなくなり、直前に戻すと元に戻る
+    assert admin.delete("/api/skills/comment", headers=CSRF).json()["registered"] is False
+    assert admin.get("/api/config").json()["tasks"] == ["doc"]
+    assert admin.post("/api/skills/comment/restore", headers=CSRF).json()["registered"] is True
+
+
+def test_replacing_skill_keeps_previous_one_for_restore(admin, skills):
+    res = admin.put("/api/skills/doc", json={"files": [{"path": "SKILL.md", "content_b64": b64("# 新しいスキル\n")}]}, headers=CSRF)
+    assert res.json()["has_backup"] is True
+    assert admin.get("/api/skills/doc/content").text == "# 新しいスキル\n"
+    admin.post("/api/skills/doc/restore", headers=CSRF)
+    assert admin.get("/api/skills/doc/content").text == "# 設計書スキル\n"
+
+
+def test_design_skill_cannot_be_removed(admin):
+    assert admin.delete("/api/skills/doc", headers=CSRF).status_code == 400
+
+
+@pytest.mark.parametrize(
+    "files, error",
+    [
+        ([{"path": "README.md", "content_b64": b64("x")}], "SKILL.md"),
+        ([{"path": "SKILL.md", "content_b64": b64("  \n")}], "空"),
+        ([{"path": "SKILL.md", "content_b64": b64("x")}, {"path": "../evil.md", "content_b64": b64("x")}], "パス"),
+        ([{"path": "SKILL.md", "content_b64": b64("x")}, {"path": "/etc/x", "content_b64": b64("x")}], "パス"),
+        ([{"path": "SKILL.md", "content_b64": "not base64!"}], "正しく送られて"),
+    ],
+)
+def test_invalid_skill_uploads_are_rejected_and_keep_current_skill(admin, skills, files, error):
+    res = admin.put("/api/skills/doc", json={"files": files}, headers=CSRF)
+    assert res.status_code == 400
+    assert error in res.json()["detail"]
+    assert (skills.dirs[DOC] / "SKILL.md").read_text(encoding="utf-8") == "# 設計書スキル\n"
+    assert not (skills.dirs[DOC].parent / "evil.md").exists()
+
+
+# --- 対象の設定（targets.toml） ------------------------------------------------------------
+
+
+def handler_only_config() -> dict:
+    return {
+        "exclude": ["**/vendor/**"],
+        "languages": [
+            {"name": "go", "enabled": True, "extensions": [".go"], "include": ["**/pkg/handler/**"], "exclude": ["**/*_test.go"]},
+            {"name": "csharp", "enabled": False, "extensions": [], "include": [], "exclude": []},
+        ],
+    }
+
+
+def test_targets_show_example_with_all_languages(client):
+    res = client.get("/api/targets").json()
+    assert res["is_example"] is True
+    assert res["path"].endswith("targets.example.toml")
+    assert res["write_path"].endswith("targets.toml")
+    assert [lang["name"] for lang in res["config"]["languages"]] == ["go", "csharp", "typescript"]
+
+
+def test_targets_preview_lists_matching_files(admin):
+    res = admin.post("/api/targets/preview", json={"config": handler_only_config()}, headers=CSRF)
+    assert res.status_code == 200
+    assert res.json()["files"] == [{"path": "pkg/handler/user.go", "language": "go"}]
+
+
+def test_targets_are_saved_to_targets_toml_used_by_runner(admin, app_dir):
+    res = admin.put("/api/targets", json={"config": handler_only_config()}, headers=CSRF)
+    assert res.status_code == 200
+    assert res.json()["is_example"] is False
+    saved = tomllib.loads((app_dir / "targets.toml").read_text(encoding="utf-8"))
+    assert saved["languages"][0]["include"] == ["**/pkg/handler/**"]
+    assert admin.get("/api/targets").json()["path"] == str(app_dir / "targets.toml")
+
+
+@pytest.mark.parametrize(
+    "change, error",
+    [
+        (lambda c: c["languages"][0].update(include=[]), "include"),
+        (lambda c: c["languages"][0].update(extensions=["go"]), "拡張子"),
+        (lambda c: c["languages"][0].update(include=["/abs/**"]), "相対パス"),
+        (lambda c: c["languages"][0].update(name="java"), "name"),
+        (lambda c: c["languages"][0].update(enabled=False), "有効"),
+        (lambda c: c["languages"][0].update(unknown=1), "不明な項目"),
+    ],
+)
+def test_invalid_targets_are_not_saved(admin, app_dir, change, error):
+    config = handler_only_config()
+    change(config)
+    res = admin.put("/api/targets", json={"config": config}, headers=CSRF)
+    assert res.status_code == 400
+    assert error in res.json()["detail"]
+    assert not (app_dir / "targets.toml").exists()
+
+
+def test_to_toml_escapes_strings():
+    config = handler_only_config()
+    config["exclude"] = ['**/a"b/**', "**/日本語/**"]
+    assert tomllib.loads(to_toml(config))["exclude"] == ['**/a"b/**', "**/日本語/**"]
+
+
+# --- 生成物の閲覧 ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def outputs(admin, out_dir: Path) -> TestClient:
+    files = {
+        "user_api/pkg/handler/user.go.md": "# 設計書\n<script>alert(1)</script>\n",
+        "_commented/user_api/pkg/handler/user.go": "// コメント\npackage handler\n",
+        ".manifest.json": "{}",
+        "_runs/r1.jsonl": '{"status": "done"}\n{"status": "failed_validation"}\n',
+        "_runs/r1.log": "log\n",
+    }
+    for rel, body in files.items():
+        (out_dir / rel).parent.mkdir(parents=True, exist_ok=True)
+        (out_dir / rel).write_text(body, encoding="utf-8")
+    return admin
+
+
+def test_lists_outputs_without_logs_or_internal_files(outputs):
+    items = outputs.get("/api/outputs").json()
+    assert {(i["path"], i["kind"]) for i in items} == {
+        ("user_api/pkg/handler/user.go.md", "doc"),
+        ("_commented/user_api/pkg/handler/user.go", "comment"),
+    }
+    assert outputs.get("/api/runs").json()[0]["counts"] == {"done": 1, "failed_validation": 1}
+
+
+def test_output_file_is_served_as_plain_text(outputs):
+    res = outputs.get("/api/outputs/file", params={"path": "user_api/pkg/handler/user.go.md"})
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/plain")
+    assert "<script>" in res.text
+    download = outputs.get("/api/outputs/file", params={"path": "user_api/pkg/handler/user.go.md", "download": True})
+    assert "attachment" in download.headers["content-disposition"]
+
+
+@pytest.mark.parametrize("path", ["../repos/user_api/pkg/handler/user.go", "_runs/r1.log", ".manifest.json", ""])
+def test_output_file_outside_outputs_is_forbidden(outputs, path):
+    assert outputs.get("/api/outputs/file", params={"path": path}).status_code == 403
+
+
+def test_invalid_run_id_is_rejected(admin):
+    assert admin.get("/api/runs/..%2Fsecret/log").status_code in (400, 404)
+    assert admin.get("/api/runs/nope/log").status_code == 404
+
+
+# --- 設定 ---------------------------------------------------------------------------------
+
+
+def test_parse_browse_roots(tmp_path):
+    assert parse_browse_roots(f"{tmp_path}, {tmp_path}") == (tmp_path.resolve(),)
+    with pytest.raises(ValueError, match="絶対パス"):
+        parse_browse_roots("relative/path")
+    with pytest.raises(ValueError, match="ありません"):
+        parse_browse_roots(str(tmp_path / "missing"))
+    with pytest.raises(ValueError, match="1つ以上"):
+        parse_browse_roots(" , ")
+
+
+def test_targets_config_path_not_created_yet_shows_example(client, app_dir, tmp_path, monkeypatch):
+    monkeypatch.setenv("TARGETS_CONFIG", str(tmp_path / "conf" / "targets.toml"))
+    res = client.get("/api/targets")
+    assert res.status_code == 200
+    assert res.json()["is_example"] is True
+    assert res.json()["write_path"] == str(tmp_path / "conf" / "targets.toml")

@@ -114,6 +114,7 @@ Ollama の接続先（`ANTHROPIC_BASE_URL` など）は runner が `claude` の�
 ### コメント追記
 
 `.env` に `CLAUDE_COMMENT_SKILL_PATH`（コメント追記スキルの SKILL.md）を設定すると、設計書の生成と同じ実行の中で、対象の各ファイルにコメントを追記する。
+`skills/comment-batch/SKILL.md` に置いた場合（Web 画面から登録した場合を含む）は、`.env` に書かなくても有効になる。
 スキルの置き方・扱い（全文をシステムプロンプトに入れる、日付を渡す、ファイル編集をさせない等）は設計書のスキルと同じ。
 
 #### 有効にする手順（設計書の生成がすでに動いているサーバーに追加する場合）
@@ -173,7 +174,7 @@ ssh gb10 "diff -ru /srv/repos/myapp/user_api/pkg/handler /opt/Lang_Chain/out/_co
 
 以降は、手動実行・夜間の定期実行のどちらでも、設計書と一緒にコメント追記が行われる（`--tasks` の指定は不要）。
 試した3ファイルは記録済みのため、次回の実行ではソースが変わらない限りスキップされる。
-コメント追記を止めるには、`.env` の `CLAUDE_COMMENT_SKILL_PATH` の行を削除する。
+コメント追記を止めるには、`.env` の `CLAUDE_COMMENT_SKILL_PATH` の行を削除する（`skills/comment-batch/` に置いている場合は、そのフォルダも移すか、Web 画面の「登録を外す」を使う）。
 
 #### 動作の詳細
 
@@ -196,14 +197,27 @@ python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --run-id nightl
 # 途中で止まった・失敗があった場合は同じコマンドで再実行（完了済みは飛ばし、残りを最初から処理する）
 python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --run-id nightly-20261102
 
-# タスクを選んで実行（省略時は doc と、CLAUDE_COMMENT_SKILL_PATH があれば comment も）
+# タスクを選んで実行（省略時は doc と、コメント追記スキル（CLAUDE_COMMENT_SKILL_PATH または skills/comment-batch/SKILL.md）があれば comment も）
 python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --tasks comment
 ```
 
 - `--limit` はファイル×タスクの件数で数える（両方のタスクを実行する場合、`--limit 5` は約2.5ファイル分）
 - 並列数（`LLM_CONCURRENCY`）はタスクをまたいだ合計。両方のタスクを実行すると Claude Code の実行回数はおよそ2倍になる
 
-終了コード: `0` 全件成功 / `1` 一部失敗（詳細は計測ログ） / `2` 設定・接続エラーで開始できず
+終了コード: `0` 全件成功 / `1` 一部失敗（詳細は計測ログ） / `2` 設定・接続エラー、または同じ出力先で別の実行が進行中のため開始できず
+
+## ブラウザ（Web 画面）からの運用
+
+GB10 上で Web 画面を常駐させると、クライアント PC のブラウザ（例：`http://192.168.31.26:4000`）から次のことができる。
+
+- 実行・停止と、進捗のログ・実行履歴・生成物（設計書・コメント追記済みファイル）の確認
+- スキル（SKILL.md と参照ファイル）の登録
+- 対象フォルダ（`--repo`）と出力先フォルダ（`--out`）のダイアログでの選択
+- 対象の設定（targets.toml）の編集と、対象になるファイルのプレビュー
+
+閲覧は誰でもでき、実行と設定の変更は管理者パスワードでログインした人だけができる。
+同時に動く runner は1つだけになるよう、Web 画面・コマンド・夜間タイマーの間でも排他する（runner が出力先ごとにロックを取る）。
+設置・使い方・セキュリティ上の注意は [docs/web_ui.md](docs/web_ui.md) にまとめている。
 
 ## クライアント(Claude Code)からの運用
 
