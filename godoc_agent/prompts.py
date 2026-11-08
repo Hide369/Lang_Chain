@@ -116,3 +116,88 @@ def build_comment_messages(
 
 def build_comment_feedback(draft: str, issues: list[str]) -> str:
     return _retry_section("ファイル", draft, issues)
+
+
+# --- 追加のスキル（Web 画面などから登録したもの）の汎用プロンプト -----------------------------------
+
+DOCUMENT_SYSTEM_PROMPT = """あなたは{language}のソースファイルごとに文書を一括生成するバッチ処理の一部として、非対話で動作しています。
+<skill> に書かれたスキルの手順と記述ルールに従ってください。
+
+バッチ処理のため、次のルールをスキルの記述より優先します:
+- ファイルの作成・編集やコマンドの実行はしない。スキルにファイル保存の手順があっても、保存はバッチ側が行う
+- 完成した文書のMarkdown本文だけを最終応答として出力する。前置き・説明・```での囲みは付けない
+- ユーザーへの質問はしない（回答は得られない）。不明な点は文書内に「不明」と明記する
+- スキルが参照している別ファイルは {skill_dir} から Read で読める
+- 今日の日付は {today} とする。スキルで今日の日付を記述する箇所にはこの日付を使い、書式はスキルの指定に従う
+
+<skill>
+{skill}
+</skill>
+"""
+
+NEW_DOCUMENT_SECTION = """## 前回の文書
+なし（新規作成）。"""
+
+DOCUMENT_REVISION_SECTION = """## 前回の文書（改訂）
+このファイルの文書は前回生成済みです。現在のソースに合わせて改訂してください。
+- スキルに履歴・版の記載ルールがあれば従い、前回までの履歴は変更・削除せずに残す
+- ソースに変更がない箇所の記述は、前回の文書の内容を踏襲する
+
+<previous_doc>
+{previous_doc}
+</previous_doc>"""
+
+
+def build_document_messages(
+    skill: str, skill_dir: Path, today: date, rel_path: str, facts: SourceFacts, previous_doc: str | None
+) -> list:
+    history = DOCUMENT_REVISION_SECTION.format(previous_doc=previous_doc) if previous_doc else NEW_DOCUMENT_SECTION
+    human = f"""次の{facts.language}ファイルについて、スキルに従って文書を作成してください: {rel_path}
+（作業ディレクトリがリポジトリのルートです。対象ファイルや関連ファイルは Read / Grep / Glob で参照してください）
+
+## 抽出済みの事実（静的解析の結果。これと矛盾する記述をしないこと）
+{facts.to_prompt()}
+
+{history}"""
+    system = DOCUMENT_SYSTEM_PROMPT.format(language=facts.language, skill_dir=skill_dir, today=today.isoformat(), skill=skill)
+    return [SystemMessage(content=system), HumanMessage(content=human)]
+
+
+def build_document_feedback(draft: str, issues: list[str]) -> str:
+    return _retry_section("文書", draft, issues)
+
+
+REWRITE_SYSTEM_PROMPT = """あなたは{language}ファイルの書き換えを一括で行うバッチ処理の一部として、非対話で動作しています。
+<skill> に書かれたスキルの手順と記述ルールに従ってください。
+
+バッチ処理のため、次のルールをスキルの記述より優先します:
+- ファイルの作成・編集やコマンドの実行はしない。スキルにファイルを編集する手順があっても、書き出しはバッチ側が行う
+- 書き換えた{language}ファイルの全文だけを最終応答として出力する。前置き・説明・```での囲みは付けない。
+  変更が不要な場合も、元のファイルの全文をそのまま出力する
+- 書き換えられるのはこのファイルだけ。スキルが他のファイルの変更を求めていても、このファイルの中で完結させる
+- ユーザーへの質問はしない（回答は得られない）
+- スキルが参照している別ファイルは {skill_dir} から Read で読める
+- 今日の日付は {today} とする。スキルで今日の日付を記述する箇所にはこの日付を使い、書式はスキルの指定に従う
+
+<skill>
+{skill}
+</skill>
+"""
+
+
+def build_rewrite_messages(
+    skill: str, skill_dir: Path, today: date, rel_path: str, source: str, facts: SourceFacts
+) -> list:
+    # 出力はファイルの全文なので、読み違いが起きないよう現在の内容をそのまま渡す
+    human = f"""次の{facts.language}ファイルを、スキルに従って書き換えてください: {rel_path}
+（作業ディレクトリがリポジトリのルートです。関連ファイルは Read / Grep / Glob で参照してください）
+
+## 抽出済みの事実（静的解析の結果）
+{facts.to_prompt()}
+
+## 現在のファイルの内容
+<source>
+{source}
+</source>"""
+    system = REWRITE_SYSTEM_PROMPT.format(language=facts.language, skill_dir=skill_dir, today=today.isoformat(), skill=skill)
+    return [SystemMessage(content=system), HumanMessage(content=human)]

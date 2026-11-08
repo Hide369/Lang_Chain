@@ -12,12 +12,17 @@ from pathlib import Path
 
 from langchain_core.messages import AnyMessage
 
+from .prompts import (
+    build_agent_messages,
+    build_comment_feedback,
+    build_comment_messages,
+    build_doc_feedback,
+    build_document_feedback,
+    build_document_messages,
+    build_rewrite_messages,
+)
+from .skill_registry import COMMENT, COMMENT_ONLY, DOC, DOCUMENT, REWRITE, SkillDef
 from .source_common import SourceFacts, first_code_difference
-from .prompts import build_agent_messages, build_comment_feedback, build_comment_messages, build_doc_feedback
-
-DOC = "doc"
-COMMENT = "comment"
-TASK_NAMES = (DOC, COMMENT)
 
 # (rel_path, source, facts, previous_output) -> 最初に送るメッセージ
 InitialMessages = Callable[[str, str, SourceFacts, str | None], list[AnyMessage]]
@@ -85,10 +90,75 @@ def design_doc_task(skill: str, skill_dir: Path, today: date, *, max_input_chars
     )
 
 
-def comment_task(skill: str, skill_dir: Path, today: date, *, max_input_chars: int) -> Task:
+def find_document_issues(draft: str, source: str, exported: list[str]) -> list[str]:
+    # 追加のスキルの文書は構成が分からないため、本文があることだけを確かめる
+    return [] if draft.strip() else ["文書の本文が空です"]
+
+
+def find_rewrite_issues(draft: str, source: str, exported: list[str]) -> list[str]:
+    # コードの変更を許すスキルは正しさを機械的に判定できないため、本文があることだけを確かめる。
+    # 元のリポジトリは書き換えず別フォルダに出力し、取り込むかどうかは人が差分を見て判断する
+    return [] if draft.strip() else ["ファイルの本文が空です"]
+
+
+def document_task(name: str, skill: str, skill_dir: Path, today: date, *, max_input_chars: int, out_subdir: str) -> Task:
     return Task(
-        name=COMMENT,
-        run_name="comment",
+        name=name,
+        run_name=name,
+        initial_messages=lambda rel_path, source, facts, previous: build_document_messages(
+            skill, skill_dir, today, rel_path, facts, previous
+        ),
+        find_issues=find_document_issues,
+        build_feedback=build_document_feedback,
+        max_input_chars=max_input_chars,
+        out_subdir=out_subdir,
+        out_suffix=".md",
+        uses_previous_output=True,
+    )
+
+
+def rewrite_task(name: str, skill: str, skill_dir: Path, today: date, *, max_input_chars: int, out_subdir: str) -> Task:
+    return Task(
+        name=name,
+        run_name=name,
+        initial_messages=lambda rel_path, source, facts, previous: build_rewrite_messages(
+            skill, skill_dir, today, rel_path, source, facts
+        ),
+        find_issues=find_rewrite_issues,
+        build_feedback=build_comment_feedback,  # 「ファイルの全文を出力し直す」依頼は同じ
+        max_input_chars=max_input_chars,
+        out_subdir=out_subdir,
+        out_suffix="",
+        # 元のリポジトリのソースは変わらないため、毎回元のソースから書き換えさせる
+        uses_previous_output=False,
+    )
+
+
+def build_skill_task(skill_def: SkillDef, skill: str, today: date, *, max_doc_chars: int, max_source_chars: int) -> Task:
+    """登録済みのスキルからタスクを作る。組み込みの doc・comment はこれまでと同じ定義になる。
+
+    max_doc_chars は文書を出力するタスク、max_source_chars はファイル全文を出力するタスクの入力上限。
+    """
+    skill_dir = skill_def.skill_dir
+    if skill_def.name == DOC:
+        return design_doc_task(skill, skill_dir, today, max_input_chars=max_doc_chars)
+    if skill_def.output_type == DOCUMENT:
+        return document_task(skill_def.name, skill, skill_dir, today, max_input_chars=max_doc_chars, out_subdir=skill_def.out_subdir)
+    if skill_def.output_type == COMMENT_ONLY:
+        return comment_task(
+            skill, skill_dir, today, max_input_chars=max_source_chars, name=skill_def.name, out_subdir=skill_def.out_subdir,
+        )
+    if skill_def.output_type == REWRITE:
+        return rewrite_task(skill_def.name, skill, skill_dir, today, max_input_chars=max_source_chars, out_subdir=skill_def.out_subdir)
+    raise ValueError(f"出力の種類が正しくありません: {skill_def.output_type!r}")
+
+
+def comment_task(
+    skill: str, skill_dir: Path, today: date, *, max_input_chars: int, name: str = COMMENT, out_subdir: str = "_commented",
+) -> Task:
+    return Task(
+        name=name,
+        run_name="comment" if name == COMMENT else name,
         initial_messages=lambda rel_path, source, facts, previous: build_comment_messages(
             skill, skill_dir, today, rel_path, source, facts
         ),
@@ -96,7 +166,7 @@ def comment_task(skill: str, skill_dir: Path, today: date, *, max_input_chars: i
         build_feedback=build_comment_feedback,
         max_input_chars=max_input_chars,
         # 元のリポジトリは書き換えず、コメントを追記したファイルを別フォルダに出力する
-        out_subdir="_commented",
+        out_subdir=out_subdir,
         out_suffix="",
         # 元のリポジトリのソースは変わらないため、毎回元のソースから追記させる
         uses_previous_output=False,

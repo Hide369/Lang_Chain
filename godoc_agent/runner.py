@@ -15,21 +15,22 @@ import json
 import sys
 import time
 from collections import Counter
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 from .claude_code import build_claude_code
-from .config import Settings, load_settings
+from .config import APP_DIR, Settings, load_settings
 from .doc_graph import build_doc_graph
 from .source_common import sha256_text
 from .preflight import preflight
 from .prompts import load_skill
 from .runlock import run_lock
 from .targets import discover_source_files
-from .tasks import COMMENT, DOC, TASK_NAMES, Task, comment_task, design_doc_task
+from .skill_registry import COMMENT, DOC, find_skill
+from .tasks import Task, build_skill_task
 
 
 @dataclass
@@ -173,13 +174,20 @@ def selected_tasks(requested: list[str] | None, settings: Settings) -> list[str]
 
 
 def build_task(name: str, settings: Settings, today: date) -> tuple[Task, Path]:
+    skill_def = find_skill(APP_DIR, name)  # 未登録のスキル名は ValueError
+    # 組み込みのスキルは、これまでどおり設定（.env）のパスを使う
     if name == DOC:
-        skill_path = settings.claude_skill_path
-        skill = load_skill(skill_path, "CLAUDE_SKILL_PATH")
-        return design_doc_task(skill, skill_path.parent, today, max_input_chars=settings.max_source_chars), skill_path.parent
-    skill_path = settings.claude_comment_skill_path
-    skill = load_skill(skill_path, "CLAUDE_COMMENT_SKILL_PATH")
-    return comment_task(skill, skill_path.parent, today, max_input_chars=settings.max_comment_source_chars), skill_path.parent
+        skill_path, setting_name = settings.claude_skill_path, "CLAUDE_SKILL_PATH"
+    elif name == COMMENT:
+        skill_path, setting_name = settings.claude_comment_skill_path, "CLAUDE_COMMENT_SKILL_PATH"
+    else:
+        skill_path, setting_name = skill_def.skill_path, f"スキル {name}"
+    skill = load_skill(skill_path, setting_name)
+    task = build_skill_task(
+        replace(skill_def, skill_path=skill_path), skill, today,
+        max_doc_chars=settings.max_source_chars, max_source_chars=settings.max_comment_source_chars,
+    )
+    return task, skill_path.parent
 
 
 async def run(args: argparse.Namespace, settings: Settings) -> int:
@@ -272,10 +280,10 @@ async def _run_batch(args: argparse.Namespace, settings: Settings, repo: Path, o
 
 
 def _task_list(value: str) -> list[str]:
+    # 登録されているかは実行の開始時に確かめる（登録ファイルの読み込みはここでは行わない）
     names = [n.strip() for n in value.split(",") if n.strip()]
-    unknown = [n for n in names if n not in TASK_NAMES]
-    if not names or unknown:
-        raise argparse.ArgumentTypeError(f"{', '.join(TASK_NAMES)} をカンマ区切りで指定してください: {value!r}")
+    if not names:
+        raise argparse.ArgumentTypeError(f"doc・comment・登録済みのスキル名をカンマ区切りで指定してください: {value!r}")
     return list(dict.fromkeys(names))
 
 
@@ -286,7 +294,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--run-id", default=datetime.now().strftime("%Y%m%d-%H%M%S"), help="計測ログ（<out>/_runs/<run_id>.jsonl）の名前。同じ値なら同じファイルに追記する")
     p.add_argument(
         "--tasks", type=_task_list, default=None,
-        help="実行するタスク（doc,comment）。省略時は doc と、コメント追記スキル（CLAUDE_COMMENT_SKILL_PATH または skills/comment-batch/SKILL.md）があれば comment",
+        help="実行するタスク（doc・comment・skills/registry.json に登録したスキル名をカンマ区切り）。省略時は doc と、コメント追記スキル（CLAUDE_COMMENT_SKILL_PATH または skills/comment-batch/SKILL.md）があれば comment",
     )
     p.add_argument("--limit", type=int, default=0, help="処理件数の上限（PoC用。ファイル×タスクの件数）")
     p.add_argument("--force", action="store_true", help="変更のないファイルも再生成する")
