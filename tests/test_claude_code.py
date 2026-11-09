@@ -106,6 +106,21 @@ async def test_error_result_raises_with_subtype(fake_claude, tmp_path):
         await make_llm(fake_claude, tmp_path).ainvoke([HumanMessage("作成して")])
 
 
+async def test_max_turns_error_explains_limit_and_how_to_raise_it(fake_claude, tmp_path):
+    # error_max_turns は result も stderr も空で返るため、subtype だけでは利用者が対処方法を判断できない
+    response = claude_result("", is_error=True, subtype="error_max_turns") | {"exit": 1}
+    response["json"]["num_turns"] = 8
+    fake_claude.respond(response)
+
+    with pytest.raises(ClaudeCodeError) as excinfo:
+        await make_llm(fake_claude, tmp_path).ainvoke([HumanMessage("作成して")])
+
+    message = str(excinfo.value)
+    assert "error_max_turns" in message
+    assert "CLAUDE_MAX_TURNS=7" in message
+    assert "使ったターン数=8" in message
+
+
 async def test_unparsable_output_raises_with_stderr(fake_claude, tmp_path):
     fake_claude.respond({"stdout": "not json", "stderr": "API Error: connection refused", "exit": 1})
 
