@@ -82,6 +82,7 @@ EOF
 **対処**：
 - `OLLAMA_NUM_PARALLEL` を `1` に下げる（`.env` の `LLM_CONCURRENCY` も `1` にする）
 - それでも収まらなければ、コンテキスト長を `131072` などに下げる。`OLLAMA_CONTEXT_LENGTH` と `.env` の `LLM_NUM_CTX` は**必ず同じ値**にする（大きすぎるファイルを事前に弾く基準がずれるため）
+- 256K と 128K のどちらにするかは、[4. コンテキスト長の決め方](#4-コンテキスト長の決め方256k-か-128k-か) の手順で、実際の入力の大きさを測って決める
 
 ### 2-2. Claude Code が毎回送る入力が大きい
 
@@ -175,3 +176,62 @@ EOF
 | `DOC_MAX_ATTEMPTS` | `.env` | `3` | 検証NGのときに作り直す回数の上限 |
 | `CLAUDE_TIMEOUT_S` | `.env` | `1800` | 1回の実行のタイムアウト（秒） |
 | `LLM_NUM_PREDICT` | `.env` | `8192` | 1回の応答の最大出力トークン数 |
+
+## 4. コンテキスト長の決め方（256K か 128K か）
+
+コンテキスト長は「扱えるファイルの大きさ」と「メモリの使用量」の釣り合いで決める。
+**実際の入力が 128K に収まっているなら、256K にしても速さ・品質は変わらず、メモリを使うだけ**になる。
+
+| | 256K（`262144`） | 128K（`131072`） |
+|---|---|---|
+| 扱えるファイルの大きさ（事前チェックの上限＝`LLM_NUM_CTX × 3 ÷ 2` 文字） | 約39万文字 | 約19.6万文字。超えたファイルは `too_large` で飛ばされる |
+| Ollama が確保するメモリ（KV キャッシュ） | 128K の約2倍（`OLLAMA_NUM_PARALLEL=2` ならさらに2倍） | 少ない |
+| メモリに収まらない場合 | 一部が CPU で処理され、大幅に遅くなる（[2-1](#2-1-コンテキスト長が大きすぎるメモリに収まっていない)） | 収まりやすい |
+
+### 4-1. 判断に使う数値を測る
+
+**実際に使っている入力トークン数の最大値**（計測ログの全実行を集計する）
+
+```bash
+cd /opt/Lang_Chain
+.venv/bin/python - out/_runs <<'EOF'
+import glob, json, sys
+
+tokens, too_large = [], 0
+for path in glob.glob(f"{sys.argv[1]}/*.jsonl"):
+    for line in open(path, encoding="utf-8"):
+        if not line.strip():
+            continue
+        r = json.loads(line)
+        too_large += r.get("status") == "too_large"
+        tokens += [c["total_input_tokens"] for c in r.get("llm_calls") or [] if c.get("total_input_tokens")]
+
+tokens.sort()
+if tokens:
+    print(f"Claude Code の実行: {len(tokens)} 回 / 入力トークン 最大 {tokens[-1]} / 上位5% {tokens[int(len(tokens) * 0.95)]}")
+else:
+    print("入力トークンの記録がありません")
+print(f"too_large（大きすぎて飛ばしたファイル）: {too_large} 件")
+EOF
+```
+
+**256K がメモリに収まっているか**（バッチの実行中に確認する）
+
+```bash
+ollama ps   # PROCESSOR 列が 100% GPU か、CPU が混ざっているか
+```
+
+> 集計の「最大」には、`error_max_turns` などで失敗した実行は含まれない（失敗した実行は `llm_calls` が記録されないため）。
+> 失敗が多い場合は、先に `CLAUDE_MAX_TURNS` を上げるなどして失敗を減らしてから測ると、実態に近い値になる。
+
+### 4-2. 決め方
+
+| 測った結果 | 選ぶ設定 |
+|---|---|
+| 入力の最大が約11.5万トークン（128K の 90%）未満で、今後も大きいファイルが増える見込みがない | **128K**。メモリに余裕ができ、並列2でも安定する |
+| 11.5万トークンを超える実行がある、または 128K にすると `too_large` になるファイルがあり、`ollama ps` が `100% GPU` | **256K** のまま |
+| 上と同じだが、`ollama ps` に `CPU` が混ざっている | 256K のまま `LLM_CONCURRENCY=1`（`OLLAMA_NUM_PARALLEL=1`）にするか、128K にして大きいファイルを諦めるか。同じ対象で経過時間を計測して速い方を採る |
+
+128K で `too_large` になるかは、ソースの文字数と前回の設計書の文字数の合計が約19.6万文字を超えるかで判断できる。
+
+どちらに変える場合も、`OLLAMA_CONTEXT_LENGTH` と `.env` の `LLM_NUM_CTX` は**必ず同じ値**にし、[3. 設定値の一覧](#3-設定値の一覧) の手順で Ollama と Web 画面を再起動する。
