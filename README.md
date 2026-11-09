@@ -55,6 +55,7 @@ generate の中身（ファイルごと）:
 
 起動から終了までの処理の流れ（検証・保存・終了コードなど）は [docs/workflow.md](docs/workflow.md) にまとめている。
 処理対象の言語・フォルダ・ファイル・除外を変える手順は [docs/target_files.md](docs/target_files.md) にまとめている。
+処理が遅いときの切り分け（原因の候補・計測ログの集計方法・関係する設定）は [docs/performance_troubleshooting.md](docs/performance_troubleshooting.md) にまとめている。
 以前の版（Go 専用）からサーバーを入れ替える手順は [docs/migration_multi_language.md](docs/migration_multi_language.md) にまとめている。
 チェックポイント廃止・再生成の見直し版（PR #21）への入れ替え手順は [docs/migration_drop_checkpointer.md](docs/migration_drop_checkpointer.md) にまとめている。
 Web 画面版（PR #23・#24）への入れ替え手順（夜間タイマーからの切り替え・GitLab の認証を含む）は [docs/migration_web_ui.md](docs/migration_web_ui.md) にまとめている。
