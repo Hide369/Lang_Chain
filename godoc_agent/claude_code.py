@@ -88,6 +88,15 @@ class ClaudeCodeLLM:
             args += ["--append-system-prompt", system]
         return args
 
+    def _error_hint(self, data: dict) -> str:
+        # error_max_turns は result も stderr も空で返り、subtype だけではコンテキスト超過などと見分けにくい
+        if data.get("subtype") == "error_max_turns":
+            return (
+                f"ターン数の上限 CLAUDE_MAX_TURNS={self.max_turns} に達しました（使ったターン数={data.get('num_turns')}）。"
+                ".env の CLAUDE_MAX_TURNS を増やしてください"
+            )
+        return ""
+
     async def ainvoke(self, messages: list[AnyMessage], config=None, **kwargs) -> AIMessage:
         proc = await asyncio.create_subprocess_exec(
             *self._args(messages),
@@ -112,10 +121,9 @@ class ClaudeCodeLLM:
                 f"Claude Code の出力をJSONとして読めません (exit={proc.returncode}): {stderr_tail}"
             ) from None
         if proc.returncode != 0 or data.get("is_error"):
-            # 例: subtype=error_max_turns（CLAUDE_MAX_TURNS に達した）
             raise ClaudeCodeError(
                 f"Claude Code がエラー終了しました (exit={proc.returncode}, subtype={data.get('subtype')}): "
-                f"{data.get('result') or stderr_tail}"
+                f"{data.get('result') or stderr_tail or self._error_hint(data)}"
             )
 
         usage = data.get("usage") or {}
