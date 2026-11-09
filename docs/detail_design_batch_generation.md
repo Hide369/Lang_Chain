@@ -63,7 +63,7 @@ sudo systemctl edit ollama
 ```ini
 [Service]
 Environment="OLLAMA_HOST=0.0.0.0:11434"
-Environment="OLLAMA_CONTEXT_LENGTH=65536"
+Environment="OLLAMA_CONTEXT_LENGTH=262144"
 Environment="OLLAMA_KEEP_ALIVE=-1"
 Environment="OLLAMA_NUM_PARALLEL=1"
 ```
@@ -71,7 +71,7 @@ Environment="OLLAMA_NUM_PARALLEL=1"
 | 変数 | 値 | 理由 |
 |---|---|---|
 | `OLLAMA_HOST` | `0.0.0.0:11434` | クライアントPCから接続できるようにする |
-| `OLLAMA_CONTEXT_LENGTH` | `65536` | Claude Code に必要なコンテキスト長を確保する |
+| `OLLAMA_CONTEXT_LENGTH` | `262144` | Claude Code に必要なコンテキスト長を確保する |
 | `OLLAMA_KEEP_ALIVE` | `-1` | セッションごとにモデルが再ロードされるのを防ぐ（連続実行の高速化） |
 | `OLLAMA_NUM_PARALLEL` | `1` | 1件ずつ順番に処理するため、メモリを1リクエストに集中させる |
 
@@ -81,10 +81,10 @@ Environment="OLLAMA_NUM_PARALLEL=1"
 sudo systemctl daemon-reload
 sudo systemctl restart ollama
 ollama run qwen3-coder-next "hello" > /dev/null
-ollama ps     # CONTEXT 列が 65536 になっていることを確認
+ollama ps     # CONTEXT 列が 262144 になっていることを確認
 ```
 
-> GB10 はメモリに余裕があるため、大きいファイルを扱う場合は `131072` まで上げても構いません。メモリ不足で起動しない場合は値を下げます。
+> 256K（`262144`）はメモリを多く使います。メモリ不足で起動しない場合は `131072` などに下げます（`.env` の `LLM_NUM_CTX` も同じ値にします）。
 
 ### 5.2 クライアントから接続を確認する
 
@@ -340,9 +340,9 @@ pwsh -File scripts/gen_design.ps1
 
 Claude Code はシステムプロンプトとツール定義だけで多くのトークンを使います。そこにスキルの指示、Goファイル本体、生成する設計書が加わります。
 
-- `OLLAMA_CONTEXT_LENGTH=65536` で、目安としておおむね 1,000〜1,500 行程度のファイルまで扱えます
+- `OLLAMA_CONTEXT_LENGTH=262144` で、目安としておおむね 4,000〜6,000 行程度のファイルまで扱えます（`65536` のときの約4倍）
 - それを超えるファイルは `too_large.txt` に記録されます。次のどちらかで対応します
-  - GB10 のコンテキスト長を `131072` に上げて、`MAX_LINES` を引き上げて再実行する
+  - `MAX_LINES` を引き上げて再実行する（コンテキスト長を下げている場合は、GB10 のメモリが許す範囲で上げる）
   - 「型定義」「主要な関数」など範囲を区切った指示で、個別に生成する
 
 ### 7.2 処理時間

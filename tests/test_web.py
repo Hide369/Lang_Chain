@@ -530,7 +530,7 @@ def test_to_toml_escapes_strings():
 @pytest.fixture
 def outputs(admin, out_dir: Path) -> TestClient:
     files = {
-        "user_api/pkg/handler/user.go.md": "# 設計書\n<script>alert(1)</script>\n",
+        "user_api/pkg/handler/詳細設計書_user.md": "# 設計書\n<script>alert(1)</script>\n",
         "_commented/user_api/pkg/handler/user.go": "// コメント\npackage handler\n",
         ".manifest.json": "{}",
         "_runs/r1.jsonl": '{"status": "done"}\n{"status": "failed_validation"}\n',
@@ -545,18 +545,18 @@ def outputs(admin, out_dir: Path) -> TestClient:
 def test_lists_outputs_without_logs_or_internal_files(outputs):
     items = outputs.get("/api/outputs").json()
     assert {(i["path"], i["kind"]) for i in items} == {
-        ("user_api/pkg/handler/user.go.md", "doc"),
+        ("user_api/pkg/handler/詳細設計書_user.md", "doc"),
         ("_commented/user_api/pkg/handler/user.go", "comment"),
     }
     assert outputs.get("/api/runs").json()[0]["counts"] == {"done": 1, "failed_validation": 1}
 
 
 def test_output_file_is_served_as_plain_text(outputs):
-    res = outputs.get("/api/outputs/file", params={"path": "user_api/pkg/handler/user.go.md"})
+    res = outputs.get("/api/outputs/file", params={"path": "user_api/pkg/handler/詳細設計書_user.md"})
     assert res.status_code == 200
     assert res.headers["content-type"].startswith("text/plain")
     assert "<script>" in res.text
-    download = outputs.get("/api/outputs/file", params={"path": "user_api/pkg/handler/user.go.md", "download": True})
+    download = outputs.get("/api/outputs/file", params={"path": "user_api/pkg/handler/詳細設計書_user.md", "download": True})
     assert "attachment" in download.headers["content-disposition"]
 
 

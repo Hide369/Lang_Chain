@@ -1,5 +1,5 @@
 [Unit]
-Description=設計書生成の Web 画面
+Description=バッチ実行の Web 画面
 Wants=network-online.target ollama.service
 After=network-online.target ollama.service
 

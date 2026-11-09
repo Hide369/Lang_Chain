@@ -65,7 +65,7 @@ Web 画面版（PR #23・#24）への入れ替え手順（夜間タイマーか�
 # 1. Ollama の設定（systemd）
 sudo systemctl edit ollama
 #   [Service]
-#   Environment="OLLAMA_CONTEXT_LENGTH=65536"
+#   Environment="OLLAMA_CONTEXT_LENGTH=262144"
 #   Environment="OLLAMA_KEEP_ALIVE=-1"
 #   Environment="OLLAMA_NUM_PARALLEL=2"
 #   Environment="OLLAMA_MAX_LOADED_MODELS=1"
@@ -170,7 +170,7 @@ ssh gb10 "diff -ru /srv/repos/myapp/user_api/pkg/handler /opt/Lang_Chain/out/_co
 |---|---|---|
 | `too_large` | ファイルが大きく、全文を1回の応答で返せない | `.env` の `LLM_NUM_PREDICT` を上げる（例：`16384`）。上限の目安は `LLM_NUM_PREDICT × 1.5` 文字 |
 | `failed_validation` | 再生成しても、コメント以外のコードを変えてしまった | 同じコマンドで再実行する（失敗したファイルだけが処理される）。繰り返す場合はスキルにコードを変更しないよう明記する |
-| `error` | Claude Code の異常終了など（例：`error_max_turns`） | `error` 欄を確認する。ターン数不足なら `.env` の `CLAUDE_MAX_TURNS` を上げる |
+| `error` | Claude Code の異常終了、UTF-8 で読めないソース、出力ファイルの保存失敗など（例：`error_max_turns`） | `error` 欄を確認する。ターン数不足なら `.env` の `CLAUDE_MAX_TURNS` を上げる |
 
 **手順6. 完了**
 
@@ -334,14 +334,16 @@ PCを再起動した後は、ログの末尾にサマリー（`対象: ... 件 /
 
 ### 3. 設計書を取得する
 
-設計書はサーバー上の `--out` 配下に、ソースファイルと同じフォルダ構成で `<--repo からの相対パス>.go.md` として作られる。
+設計書はサーバー上の `--out` 配下に、ソースファイルと同じフォルダ構成で `詳細設計書_<拡張子を除いたファイル名>.md` として作られる（例：`user.go` → `詳細設計書_user.md`）。
+以前の名前（`user.go.md`）の設計書が残っていれば、次の実行時に新しい名前へ移し、履歴（版）を引き継ぐ。
+拡張子だけが違うソース（`user.go` と `user.ts` など）が同じフォルダにあると出力先が重なるため、2つ目以降は `error` として記録し生成しない。
 `--out ./out` のような相対パスは実行時のカレントディレクトリが基準になるため、このREADMEの手順（`/opt/Lang_Chain` で実行）では `/opt/Lang_Chain/out/` になる。
 
 ```
 --repo /srv/repos/myapp  --out ./out （/opt/Lang_Chain で実行）の場合
 
-/srv/repos/myapp/user_api/pkg/handler/user.go    → /opt/Lang_Chain/out/user_api/pkg/handler/user.go.md
-/srv/repos/myapp/order_api/pkg/handler/order.go  → /opt/Lang_Chain/out/order_api/pkg/handler/order.go.md
+/srv/repos/myapp/user_api/pkg/handler/user.go    → /opt/Lang_Chain/out/user_api/pkg/handler/詳細設計書_user.md
+/srv/repos/myapp/order_api/pkg/handler/order.go  → /opt/Lang_Chain/out/order_api/pkg/handler/詳細設計書_order.md
 /opt/Lang_Chain/out/.manifest.json                 … 生成済みファイルの記録（差分スキップ用）
 /opt/Lang_Chain/out/_runs/<run-id>.jsonl           … 計測ログ
 /opt/Lang_Chain/out/_commented/user_api/pkg/handler/user.go … コメント追記済みのファイル（コメント追記を有効にした場合）
@@ -351,8 +353,8 @@ PCを再起動した後は、ログの末尾にサマリー（`対象: ... 件 /
 > 出力パスに API 名が含まれなくなるため、複数の API を同じ `--out` に出力すると、同名ファイルが上書きされ `.manifest.json` も混ざる。
 >
 > ```
-> --repo /srv/repos/user_api  → out/pkg/handler/user.go.md
-> --repo /srv/repos/order_api → out/pkg/handler/order.go.md   ← 同じ out に混在する
+> --repo /srv/repos/user_api  → out/pkg/handler/詳細設計書_user.md
+> --repo /srv/repos/order_api → out/pkg/handler/詳細設計書_order.md   ← 同じ out に混在する
 > ```
 >
 > `xx_api` の親ディレクトリを `--repo` に指定する（推奨）か、API ごとに `--out ./out/user_api` のように出力先を分けること。
