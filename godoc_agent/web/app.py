@@ -100,7 +100,7 @@ def create_app(
         finally:
             scheduler.stop()
 
-    app = FastAPI(title="設計書生成", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+    app = FastAPI(title="バッチ実行", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.scheduler = scheduler
 
     def task_options() -> list[dict]:

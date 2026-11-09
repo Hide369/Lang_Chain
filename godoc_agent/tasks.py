@@ -8,7 +8,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from langchain_core.messages import AnyMessage
 
@@ -40,11 +40,24 @@ class Task:
     build_feedback: Callable[[str, list[str]], str]
     max_input_chars: int
     out_subdir: str  # --out からの相対フォルダ（"" は --out 直下）
-    out_suffix: str  # 出力ファイル名 = ソースファイル名 + out_suffix
+    out_suffix: str  # 出力ファイル名 = ソースファイル名 + out_suffix（out_prefix があれば下記）
     uses_previous_output: bool  # 前回の出力を渡して改訂させるか
+    # 指定すると、出力ファイル名を out_prefix + 拡張子を除いたソースファイル名 + out_suffix にする
+    # （例: 詳細設計書_ + user.go → 詳細設計書_user.md）。フォルダ構成はソースと同じ
+    out_prefix: str = ""
 
     def output_path(self, out_dir: Path, rel_path: str) -> Path:
-        return out_dir / self.out_subdir / f"{rel_path}{self.out_suffix}"
+        source = PurePosixPath(rel_path)
+        name = f"{self.out_prefix}{source.stem}" if self.out_prefix else source.name
+        return out_dir / self.out_subdir / source.parent / f"{name}{self.out_suffix}"
+
+    def legacy_output_path(self, out_dir: Path, rel_path: str) -> Path | None:
+        """出力ファイル名を変える前の名前（<ソースファイル名><out_suffix>）。名前が同じなら None。
+
+        既存の出力を新しい名前に移し、履歴（版）と変更なしのスキップを引き継ぐために使う。
+        """
+        legacy = out_dir / self.out_subdir / f"{rel_path}{self.out_suffix}"
+        return None if legacy == self.output_path(out_dir, rel_path) else legacy
 
     def manifest_path(self, out_dir: Path) -> Path:
         return out_dir / self.out_subdir / ".manifest.json"
@@ -74,6 +87,10 @@ def find_comment_issues(draft: str, source: str, exported: list[str]) -> list[st
     return []
 
 
+# 設計書のファイル名の接頭辞（user.go → 詳細設計書_user.md）
+DOC_FILE_PREFIX = "詳細設計書_"
+
+
 def design_doc_task(skill: str, skill_dir: Path, today: date, *, max_input_chars: int) -> Task:
     return Task(
         name=DOC,
@@ -87,6 +104,7 @@ def design_doc_task(skill: str, skill_dir: Path, today: date, *, max_input_chars
         out_subdir="",
         out_suffix=".md",
         uses_previous_output=True,
+        out_prefix=DOC_FILE_PREFIX,
     )
 
 

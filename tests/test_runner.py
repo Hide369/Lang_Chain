@@ -12,6 +12,9 @@ from godoc_agent.skill_registry import COMMENT_ONLY, DOCUMENT, REWRITE, write_re
 
 HEALTH = "user_api/pkg/handler/health.go"
 USER = "user_api/pkg/handler/user.go"
+# 設計書の出力先（user.go → 詳細設計書_user.md）
+HEALTH_DOC = "user_api/pkg/handler/詳細設計書_health.md"
+USER_DOC = "user_api/pkg/handler/詳細設計書_user.md"
 
 
 @pytest.fixture
@@ -65,8 +68,8 @@ async def test_generates_docs_and_skips_unchanged_files_next_time(env, monkeypat
     use_llm(monkeypatch, ScriptedLLM([reply(good_doc("Health")), reply(good_doc("GetUser"))]))
 
     assert await run_batch(repo, out) == 0
-    assert (out / f"{HEALTH}.md").is_file()
-    assert (out / f"{USER}.md").is_file()
+    assert (out / HEALTH_DOC).is_file()
+    assert (out / USER_DOC).is_file()
     assert set(json.loads((out / ".manifest.json").read_text(encoding="utf-8"))) == {HEALTH, USER}
 
     # 2回目は変更がないのでLLMは呼ばれない（呼ばれたらScriptedLLMが失敗する）
@@ -96,7 +99,7 @@ async def test_changed_file_is_revised_from_previous_doc(env, monkeypatch, repo,
     # 変更されたファイルだけが、前回の設計書（履歴）を添えて再生成される
     assert len(llm.calls) == 1
     assert "履歴 v1.0" in llm.calls[0][-1].content
-    assert (out / f"{HEALTH}.md").read_text(encoding="utf-8").endswith("v1.0 / v1.1\n")
+    assert (out / HEALTH_DOC).read_text(encoding="utf-8").endswith("v1.0 / v1.1\n")
 
 
 async def test_one_failing_file_does_not_stop_the_batch(env, monkeypatch, repo, tmp_path):
@@ -110,7 +113,7 @@ async def test_one_failing_file_does_not_stop_the_batch(env, monkeypatch, repo, 
     statuses = {log["rel_path"]: log["status"] for log in logs}
     assert statuses == {HEALTH: "error", USER: "done"}
     assert "draft" not in logs[0]
-    assert not (out / f"{HEALTH}.md").exists()
+    assert not (out / HEALTH_DOC).exists()
 
 
 async def test_rerun_regenerates_only_failed_file_from_scratch(env, monkeypatch, repo, tmp_path):
@@ -126,7 +129,7 @@ async def test_rerun_regenerates_only_failed_file_from_scratch(env, monkeypatch,
     assert len(llm.calls) == 1
     # 前回の会話（草稿・フィードバック）は引き継がず、最初のメッセージ（システム＋依頼）だけを送る
     assert [type(m).__name__ for m in llm.calls[0]] == ["SystemMessage", "HumanMessage"]
-    assert (out / f"{HEALTH}.md").is_file()
+    assert (out / HEALTH_DOC).is_file()
 
 
 def option(argv: list[str], name: str) -> str:
@@ -144,8 +147,8 @@ async def test_runs_claude_code_in_repo_and_retries_in_new_session(env, monkeypa
 
     assert await run_batch(repo, out) == 0
 
-    assert (out / f"{HEALTH}.md").read_text(encoding="utf-8").startswith("# 詳細設計書")
-    assert (out / f"{USER}.md").is_file()
+    assert (out / HEALTH_DOC).read_text(encoding="utf-8").startswith("# 詳細設計書")
+    assert (out / USER_DOC).is_file()
     calls = fake_claude.calls()
     assert len(calls) == 3
     assert all(os.path.samefile(c["cwd"], repo) for c in calls)
@@ -178,7 +181,7 @@ async def test_input_near_context_limit_is_warned_without_failing(env, monkeypat
     # 警告があっても合否は変わらず、出力も保存される
     assert await run_batch(repo, out) == 0
 
-    assert (out / f"{HEALTH}.md").is_file()
+    assert (out / HEALTH_DOC).is_file()
     logs = read_logs(out)
     assert logs[HEALTH]["status"] == "done"
     assert logs[HEALTH]["issues"] == []
@@ -268,7 +271,7 @@ exclude = ["**/*.test.ts"]
 
     assert await run_batch(repo, out) == 0
 
-    assert (out / f"{ts}.md").is_file()
+    assert (out / "web/src/詳細設計書_user.md").is_file()
     system, human = llm.calls[2]
     # 設計書スキルは共通で、言語名だけがプロンプトで切り替わる
     assert "TypeScriptの詳細設計書" in system.content
@@ -301,7 +304,7 @@ async def test_runs_doc_and_comment_tasks_in_one_batch(env, comment_skill, monke
 
     assert await run_batch(repo, out) == 0
 
-    assert (out / f"{USER}.md").read_text(encoding="utf-8").startswith("# 詳細設計書")
+    assert (out / USER_DOC).read_text(encoding="utf-8").startswith("# 詳細設計書")
     # コメント追記済みのGoファイルは _commented 配下に出力し、元のリポジトリは書き換えない
     assert (out / "_commented" / USER).read_text(encoding="utf-8") == with_comment(repo, USER)
     assert not (repo / USER).read_text(encoding="utf-8").startswith("//")
@@ -325,7 +328,7 @@ async def test_comment_that_changes_code_is_not_written(env, comment_skill, monk
     assert await run_batch(repo, out) == 1
 
     assert not (out / "_commented" / HEALTH).exists()
-    assert (out / f"{HEALTH}.md").is_file()  # 同じファイルの設計書は影響を受けない
+    assert (out / HEALTH_DOC).is_file()  # 同じファイルの設計書は影響を受けない
     logs = [json.loads(line) for line in (out / "_runs" / "r1.jsonl").read_text(encoding="utf-8").splitlines()]
     failed = [log for log in logs if log["status"] != "done"]
     assert [(log["task"], log["rel_path"], log["status"]) for log in failed] == [("comment", HEALTH, "failed_validation")]
@@ -340,7 +343,7 @@ async def test_tasks_option_runs_only_selected_task(env, comment_skill, monkeypa
     assert await run_batch(repo, out, "--tasks", "comment") == 0
 
     assert (out / "_commented" / HEALTH).is_file()
-    assert not (out / f"{HEALTH}.md").exists()
+    assert not (out / HEALTH_DOC).exists()
 
 
 async def test_comment_task_requires_its_skill_path(env, repo, tmp_path):
@@ -417,3 +420,80 @@ async def test_custom_skill_without_skill_file_is_reported(env, custom_skills, r
     (custom_skills / "skills" / "fmt" / "SKILL.md").unlink()
     with pytest.raises(FileNotFoundError, match="SKILL.md"):
         await run_batch(repo, tmp_path / "out", "--tasks", "fmt")
+
+
+async def test_unreadable_source_is_recorded_and_the_batch_continues(env, monkeypatch, repo, tmp_path):
+    # UTF-8 でないファイル（Shift_JIS など）があっても、そのファイルだけを error にして残りを処理する
+    (repo / HEALTH).write_bytes("package handler\n// 日本語\n".encode("cp932"))
+    out = tmp_path / "out"
+    use_llm(monkeypatch, ScriptedLLM([reply(good_doc("GetUser"))]))
+
+    assert await run_batch(repo, out) == 1
+
+    logs = read_logs(out)
+    assert logs[HEALTH]["status"] == "error"
+    assert "UTF-8" in logs[HEALTH]["error"]
+    assert logs[USER]["status"] == "done"
+    assert (out / USER_DOC).is_file()
+    assert set(json.loads((out / ".manifest.json").read_text(encoding="utf-8"))) == {USER}
+
+
+async def test_output_that_cannot_be_saved_fails_only_that_file(env, monkeypatch, repo, tmp_path):
+    out = tmp_path / "out"
+    # 出力先にフォルダがあって書き込めない状態
+    (out / HEALTH_DOC).mkdir(parents=True)
+    use_llm(monkeypatch, ScriptedLLM([reply(good_doc("Health")), reply(good_doc("GetUser"))]))
+
+    assert await run_batch(repo, out) == 1
+
+    logs = read_logs(out)
+    assert logs[HEALTH]["status"] == "error"
+    assert "保存できません" in logs[HEALTH]["error"]
+    assert logs[USER]["status"] == "done"
+    assert set(json.loads((out / ".manifest.json").read_text(encoding="utf-8"))) == {USER}
+
+
+async def test_doc_with_old_name_is_renamed_and_kept_up_to_date(env, monkeypatch, repo, tmp_path):
+    out = tmp_path / "out"
+    use_llm(monkeypatch, ScriptedLLM([reply(good_doc("Health")), reply(good_doc("GetUser"))]))
+    assert await run_batch(repo, out) == 0
+    # 名前を変える前の出力（user.go.md）に戻す
+    for rel, doc in ((HEALTH, HEALTH_DOC), (USER, USER_DOC)):
+        (out / doc).rename(out / f"{rel}.md")
+
+    # 変更がなければ新しい名前に移すだけで、作り直さない（LLM を呼んだら ScriptedLLM が失敗する）
+    use_llm(monkeypatch, ScriptedLLM([]))
+    assert await run_batch(repo, out, "--run-id", "r2") == 0
+    assert (out / HEALTH_DOC).is_file() and (out / USER_DOC).is_file()
+    assert not (out / f"{HEALTH}.md").exists()
+
+
+async def test_sources_sharing_an_output_name_do_not_overwrite_each_other(env, monkeypatch, repo, tmp_path):
+    config = tmp_path / "targets.toml"
+    config.write_text(
+        """
+[[languages]]
+name = "go"
+extensions = [".go"]
+include = ["web/**"]
+
+[[languages]]
+name = "typescript"
+extensions = [".ts"]
+include = ["web/**"]
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TARGETS_CONFIG", str(config))
+    (repo / "web").mkdir()
+    (repo / "web/user.go").write_text("package web\n\nfunc GetUser() {}\n", encoding="utf-8")
+    (repo / "web/user.ts").write_text("export function getUser() {}\n", encoding="utf-8")
+    out = tmp_path / "out"
+    use_llm(monkeypatch, ScriptedLLM([reply(good_doc("GetUser"))]))
+
+    assert await run_batch(repo, out) == 1
+
+    logs = read_logs(out)
+    assert logs["web/user.go"]["status"] == "done"
+    assert logs["web/user.ts"]["status"] == "error"
+    assert "web/詳細設計書_user.md" in logs["web/user.ts"]["error"]

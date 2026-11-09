@@ -101,7 +101,7 @@ def load_settings() -> Settings:
     return Settings(
         ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
         model=os.getenv("LLM_MODEL", "qwen3-coder-next"),
-        num_ctx=_int_env("LLM_NUM_CTX", 65536, minimum=4096),
+        num_ctx=_int_env("LLM_NUM_CTX", 262144, minimum=4096),
         ctx_warn_ratio=_ratio_env("LLM_CTX_WARN_RATIO", 0.9),
         num_predict=_int_env("LLM_NUM_PREDICT", 8192),
         concurrency=_int_env("LLM_CONCURRENCY", 2),

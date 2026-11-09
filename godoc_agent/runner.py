@@ -121,6 +121,36 @@ async def process_file(
     )
 
 
+def migrate_legacy_output(task: Task, out_dir: Path, rel_path: str) -> None:
+    """名前を変える前（例: user.go.md）の出力があれば、新しい名前（例: 詳細設計書_user.md）に移す。
+
+    移しておくと、前回の設計書の履歴（版）を引き継いで改訂でき、変更のないファイルも作り直さずに済む。
+    """
+    legacy = task.legacy_output_path(out_dir, rel_path)
+    if legacy is None or not legacy.is_file():
+        return
+    new = task.output_path(out_dir, rel_path)
+    if new.exists():
+        return
+    try:
+        legacy.replace(new)
+    except OSError as e:
+        # 移せなくても生成はできる（履歴を引き継がない新しい設計書になる）ため、知らせて続ける
+        print(f"注意: 以前の名前の出力を移せませんでした（{legacy} → {new}）: {e}", flush=True)
+
+
+def save_output(task_run: TaskRun, out_dir: Path, result: FileResult) -> None:
+    """生成物を保存し、差分スキップに記録する。保存できなければ、この1件だけを失敗にする。"""
+    out_path = task_run.task.output_path(out_dir, result.rel_path)
+    try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(result.draft + "\n", encoding="utf-8")
+        task_run.manifest.record(result.rel_path, result.source_hash)
+    except OSError as e:
+        result.status = "error"
+        result.error = f"出力ファイルを保存できません: {type(e).__name__}: {e}"
+
+
 def context_warnings(llm_calls: list[dict] | None, settings: Settings) -> list[str]:
     """入力トークン数が LLM_NUM_CTX の LLM_CTX_WARN_RATIO を超えた実行を警告にする。
 
@@ -214,13 +244,37 @@ async def _run_batch(args: argparse.Namespace, settings: Settings, repo: Path, o
     manifests = {task.name: Manifest(task.manifest_path(out_dir)) for task, _ in tasks}
 
     targets: list[tuple[Task, str, str, str, str]] = []
+    # LLM を呼ぶ前に失敗が決まったもの（読み込めないファイル・出力先の重複）。バッチは止めずに記録する
+    failed_early: list[FileResult] = []
     skipped = 0
+    # タスクごとの 出力先 → ソース。拡張子だけが違うソース（user.go と user.ts）が同じ設計書を上書きし合うのを防ぐ
+    claimed: dict[str, dict[Path, str]] = {task.name: {} for task, _ in tasks}
     for file in discover_source_files(repo, settings.targets):
         rel_path = file.path.relative_to(repo).as_posix()
-        source = file.path.read_text(encoding="utf-8")
+        try:
+            source = file.path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as e:
+            # 文字コードが UTF-8 でないファイルなど。このファイルだけを失敗にして次へ進む
+            failed_early += [
+                FileResult(
+                    task=task.name, rel_path=rel_path, source_hash="", status="error", duration_s=0.0,
+                    error=f"ソースファイルを UTF-8 として読み込めません: {type(e).__name__}: {e}",
+                )
+                for task, _ in tasks
+            ]
+            continue
         source_hash = sha256_text(source)
         for task, _ in tasks:
-            if not args.force and manifests[task.name].is_up_to_date(rel_path, source_hash, task.output_path(out_dir, rel_path)):
+            out_path = task.output_path(out_dir, rel_path)
+            other = claimed[task.name].setdefault(out_path, rel_path)
+            if other != rel_path:
+                failed_early.append(FileResult(
+                    task=task.name, rel_path=rel_path, source_hash=source_hash, status="error", duration_s=0.0,
+                    error=f"出力先 {out_path.relative_to(out_dir).as_posix()} が {other} と重複するため生成しません",
+                ))
+                continue
+            migrate_legacy_output(task, out_dir, rel_path)
+            if not args.force and manifests[task.name].is_up_to_date(rel_path, source_hash, out_path):
                 skipped += 1
                 continue
             targets.append((task, rel_path, file.language, source, source_hash))
@@ -229,12 +283,14 @@ async def _run_batch(args: argparse.Namespace, settings: Settings, repo: Path, o
 
     task_names = ",".join(task.name for task, _ in tasks)
     languages = ",".join(lang.name for lang in settings.targets.languages)
+    total = len(failed_early) + len(targets)
     print(f"対象の設定={settings.targets.source} 言語={languages}", flush=True)
-    print(f"run_id={args.run_id} タスク={task_names} 対象={len(targets)} 件（変更なしでスキップ={skipped} 件）", flush=True)
-    if not targets:
+    print(f"run_id={args.run_id} タスク={task_names} 対象={total} 件（変更なしでスキップ={skipped} 件）", flush=True)
+    if not total:
         return 0
 
-    await preflight(settings)
+    if targets:  # 読み込めないファイルだけのときは、Ollama に接続できなくても結果を記録できるようにする
+        await preflight(settings)
     metrics_path = out_dir / "_runs" / f"{args.run_id}.jsonl"
     # 同時に動く claude の数はタスクをまたいで LLM_CONCURRENCY に抑える（Ollama の並列数に合わせるため）
     sem = asyncio.Semaphore(settings.concurrency)
@@ -253,16 +309,20 @@ async def _run_batch(args: argparse.Namespace, settings: Settings, repo: Path, o
         asyncio.create_task(process_file(runs[task.name], sem, rel_path, language, source, source_hash, out_dir))
         for task, rel_path, language, source, source_hash in targets
     ]
+
+    async def finished_results():
+        for result in failed_early:
+            yield result
+        for finished in asyncio.as_completed(jobs):
+            yield await finished
+
     with metrics_path.open("a", encoding="utf-8") as metrics_file:
-        for i, finished in enumerate(asyncio.as_completed(jobs), start=1):
-            result = await finished
+        i = 0
+        async for result in finished_results():
+            i += 1
             result.warnings = context_warnings(result.llm_calls, settings)
             if result.status == "done" and result.draft:
-                task_run = runs[result.task]
-                out_path = task_run.task.output_path(out_dir, result.rel_path)
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                out_path.write_text(result.draft + "\n", encoding="utf-8")
-                task_run.manifest.record(result.rel_path, result.source_hash)
+                save_output(runs[result.task], out_dir, result)
             results.append(result)
             metrics_file.write(json.dumps(result.to_log(), ensure_ascii=False) + "\n")
             metrics_file.flush()
@@ -270,7 +330,7 @@ async def _run_batch(args: argparse.Namespace, settings: Settings, repo: Path, o
             if result.warnings:
                 detail += f" [警告: {'; '.join(result.warnings)}]"
             print(
-                f"[{i}/{len(targets)}] {result.status:<17} {result.duration_s:6.0f}s  {result.task:<7} {result.rel_path}{detail}",
+                f"[{i}/{total}] {result.status:<17} {result.duration_s:6.0f}s  {result.task:<7} {result.rel_path}{detail}",
                 flush=True,
             )
 
