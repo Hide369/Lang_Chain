@@ -18,8 +18,9 @@ GB10 上で vLLM を起動するときは、確保メモリ量を明示的に絞
 3. 手順1: Ollama を止める（アンインストールはしない）
 4. 手順1.5: vLLM を導入する（初回のみ）
 5. 手順2〜4: キャッシュを解放し、vLLM を起動して動作を確認する
-6. 失敗したら「[Ollama に戻す手順](#ollama-に戻す手順いつでも実行可)」で元に戻す（どの段階からでも実行できる）
-7. vLLM をもう使わないなら「[vLLM を削除する手順](#vllm-を削除する手順やめる場合)」で片付ける
+6. Qwen3-Coder-Next が動かなければ「[gpt-oss-120b に切り替える手順](#gpt-oss-120b-に切り替える手順qwen3-coder-next-が失敗したとき)」で vLLM のままモデルを替える
+7. それでも失敗したら「[Ollama に戻す手順](#ollama-に戻す手順いつでも実行可)」で元に戻す（どの段階からでも実行できる）
+8. vLLM をもう使わないなら「[vLLM を削除する手順](#vllm-を削除する手順やめる場合)」で片付ける
 
 ## アカウント登録の要否
 
@@ -29,6 +30,7 @@ GB10 上で vLLM を起動するときは、確保メモリ量を明示的に絞
 | --- | --- | --- |
 | vLLM 本体（コンテナ） | NVIDIA NGC `nvcr.io/nvidia/vllm` | 不要（公開イメージ。`docker login` なしで pull できる） |
 | モデル Qwen3-Coder-Next（FP8） | Hugging Face `Qwen/Qwen3-Coder-Next-FP8` | 不要（Apache-2.0、利用申請のないモデル） |
+| 予備のモデル gpt-oss-120b | Hugging Face `openai/gpt-oss-120b` | 不要（Apache-2.0、利用申請のないモデル） |
 | Docker・NVIDIA Container Toolkit | DGX OS に同梱 | 不要 |
 
 - `docker pull` で `unauthorized` と出た場合だけ、NGC の無料アカウントで API キーを作り `docker login nvcr.io` する
@@ -228,6 +230,74 @@ watch -n 2 free -h
 | 推論中に落ちる | 長い入力や同時リクエストで KV 不足 | `--max-num-seqs` と `--max-model-len` を下げる |
 | ツール呼び出しを含む長い入力で `!!!!` が延々と出る | ツール呼び出しの解釈の不具合（報告例あり） | `--tool-call-parser qwen3_xml` に変えて起動し直す |
 
+上の対処をすべて試しても Qwen3-Coder-Next が安定しない場合は、次の「gpt-oss-120b に切り替える手順」に進む。
+
+## gpt-oss-120b に切り替える手順（Qwen3-Coder-Next が失敗したとき）
+
+手順3の調整を試しても Qwen3-Coder-Next が起動しない、またはツール呼び出しが安定しない場合は、vLLM のまま gpt-oss-120b（`openai/gpt-oss-120b`）に切り替える。重みは約65GBと小さく、メモリに余裕がある。アカウント登録は要らない（Apache-2.0、利用申請のないモデル）。
+
+gpt-oss-120b のコンテキスト長は最大 131072（128K）で、256K にはできない。アプリの `.env` を次のように変える（変更前の `.env` は「準備」で `~/ollama-backup/env.bak` に控えてある）。`LLM_NUM_CTX` を下げると、大きなファイルは事前チェックで `too_large` として対象外になる。
+
+```bash
+# /opt/Lang_Chain/.env
+LLM_MODEL=gpt-oss-120b
+LLM_NUM_CTX=131072
+```
+
+| 項目 | Qwen3-Coder-Next | gpt-oss-120b |
+| --- | --- | --- |
+| モデル | `Qwen/Qwen3-Coder-Next-FP8` | `openai/gpt-oss-120b` |
+| 重みの大きさ | 約85GB | 約65GB |
+| `--gpu-memory-utilization` | 0.8 | 0.7 |
+| `--max-model-len`（= `LLM_NUM_CTX`） | 262144 | 131072（上限） |
+| `--kv-cache-dtype` | fp8 | 指定しない（KV キャッシュが小さく不要） |
+| `--tool-call-parser` | `qwen3_coder` | `openai` |
+| `--served-model-name`（= `LLM_MODEL`） | qwen3-coder-next | gpt-oss-120b |
+| 必要な vLLM | 0.15.0 以上 | 0.10.1 以上 |
+
+```bash
+# 1. Qwen3-Coder-Next の vLLM を止める
+docker rm -f vllm
+
+# 2. ディスクの空きを確認（gpt-oss-120b は約65GB）。足りない場合だけ Qwen3-Coder-Next のモデルを消す
+df -h ~
+sudo rm -rf ~/.cache/huggingface/hub/models--Qwen--Qwen3-Coder-Next-FP8   # 足りない場合だけ
+
+# 3. ページキャッシュを解放
+sync; echo 3 | sudo tee /proc/sys/vm/drop_caches
+free -h
+
+# 4. gpt-oss-120b で起動（モデルは初回起動時に自動でダウンロードされる）
+docker run -d --name vllm --gpus all --network host --ipc=host \
+  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  nvcr.io/nvidia/vllm:<タグ> \
+  vllm serve openai/gpt-oss-120b \
+    --served-model-name gpt-oss-120b \
+    --host 0.0.0.0 --port 8000 \
+    --gpu-memory-utilization 0.7 \
+    --max-model-len 131072 \
+    --max-num-seqs 2 \
+    --enable-auto-tool-choice --tool-call-parser openai
+
+docker logs -f vllm
+
+# 5. 動作テスト
+curl http://localhost:8000/v1/models
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-oss-120b","messages":[{"role":"user","content":"こんにちは"}],"max_tokens":64}'
+```
+
+- [ ] `/v1/models` に `gpt-oss-120b` が出る
+- [ ] 応答が返る
+- [ ] 推論中も `available` が 10GB 以上残っている
+
+- メモリが足りない場合は、手順3と同じ順（`--enforce-eager` を追加 → `--max-model-len` を下げる）で調整する。`--gpu-memory-utilization` は 0.6 まで下げられる
+- gpt-oss-120b でのツール呼び出しは `tool_choice="auto"` だけに対応している
+- Qwen3-Coder-Next に戻すときは、`docker rm -f vllm` の後に手順1.5の `docker run` で起動し直し、`.env` の `LLM_MODEL`・`LLM_NUM_CTX` を戻す
+- gpt-oss-120b でも動かない場合は、次の「Ollama に戻す手順」で元に戻す
+- 参照: [vLLM の gpt-oss-120b レシピ](https://recipes.vllm.ai/openai/gpt-oss-120b)
+
 ## Ollama に戻す手順（いつでも実行可）
 
 vLLM の導入や起動に失敗したとき、または試用をやめるときは、次の手順で元に戻す。Ollama 本体・モデル・設定は残しているので、vLLM を止めて Ollama を起動するだけで戻る。OS が応答しない場合は、再起動してから実行する。
@@ -283,6 +353,7 @@ docker rmi nvcr.io/nvidia/vllm:<タグ>
 
 # 4. モデル（約85GB）を削除。コンテナが root で書き込んだファイルなので sudo が要る
 sudo rm -rf ~/.cache/huggingface/hub/models--Qwen--Qwen3-Coder-Next-FP8
+sudo rm -rf ~/.cache/huggingface/hub/models--openai--gpt-oss-120b   # gpt-oss-120b に切り替えた場合（約65GB）
 
 # 5. 運用メモの systemd 化をしていた場合だけ、サービスを削除
 sudo systemctl disable --now vllm
@@ -306,7 +377,7 @@ rm -f ~/vllm.log
 
 - Ollama のモデル（`/usr/share/ollama/.ollama/models`）と設定（`sudo systemctl edit ollama` で入れたもの）
 - Docker と NVIDIA Container Toolkit（DGX OS に同梱で、ほかの用途でも使う）
-- `~/.cache/huggingface` フォルダ自体（ほかのモデルが入っている場合がある。消すのは Qwen3-Coder-Next-FP8 のフォルダだけ）
+- `~/.cache/huggingface` フォルダ自体（ほかのモデルが入っている場合がある。消すのは Qwen3-Coder-Next-FP8・gpt-oss-120b のフォルダだけ）
 - `~/ollama-backup`（Ollama が元どおり動くことを数日確認してから消してよい）
 
 ## 運用メモ
@@ -333,4 +404,5 @@ WantedBy=multi-user.target
 - `ExecStartPre` のキャッシュ解放は root 権限が必要なため、先頭に `+` を付けて root で実行している
 - `Conflicts=ollama.service` で、vLLM 起動時に Ollama が自動停止する
 - GB10 1台に載るのは Qwen3-Coder-Next 1モデルだけ。ほかのモデルを同時に動かす余裕はない
+- gpt-oss-120b に切り替えて運用する場合は、`Description` と `ExecStart` の `vllm serve` 以降を「gpt-oss-120b に切り替える手順」の内容にする
 - コンテナで導入した場合は、`ExecStart` を手順1.5の `docker run`（`-d` を外し `--rm` を付ける）に、`ExecStop` を `docker stop vllm` にする
