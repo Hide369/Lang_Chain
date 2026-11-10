@@ -1,4 +1,4 @@
-"""Web 画面からの runner の実行を管理する。同時に動かすのは1つだけ。
+"""Web 画面からの runner の実行を管理する。同時に動かす runner は1つだけ（runner の中で最大10セッションを並列に動かす）。
 
 runner は別プロセスで起動する（コマンドで実行したときと同じ動きにし、Web サーバーが落ちても
 バッチの途中経過は manifest に残るようにするため）。出力は計測ログと同じ `<out>/_runs/` にログとして残す。
@@ -11,12 +11,14 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from ..runlock import LOCK_FILE_NAME, is_locked
+from ..sessions import sessions_path
 from .settings import APP_DIR
 
 # 停止を指示してから、応じないプロセスを強制終了するまでの秒数
@@ -55,6 +57,7 @@ class Job:
     proc: subprocess.Popen
     git_pull: bool = False
     trigger: str = MANUAL
+    concurrency: int | None = None  # None は .env の LLM_CONCURRENCY
     stop_requested: bool = False
     finished_at: str | None = None
 
@@ -75,6 +78,7 @@ class Job:
             "force": self.force,
             "git_pull": self.git_pull,
             "trigger": self.trigger,
+            "concurrency": self.concurrency,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "running": exit_code is None,
@@ -108,7 +112,7 @@ class JobManager:
 
     def start(
         self, repo: Path, out_dir: Path, tasks: list[str], limit: int, force: bool,
-        *, git_pull: bool = False, trigger: str = MANUAL,
+        *, git_pull: bool = False, trigger: str = MANUAL, concurrency: int | None = None,
     ) -> Job:
         with self._lock:
             if self._job is not None and self._job.running:
@@ -127,6 +131,8 @@ class JobManager:
                 cmd += ["--limit", str(limit)]
             if force:
                 cmd.append("--force")
+            if concurrency:
+                cmd += ["--concurrency", str(concurrency)]
             if git_pull:
                 # 古いソースから作らないよう、git pull に失敗したら runner を起動しない
                 cmd = [sys.executable, "-m", "godoc_agent.web.pull_and_run", str(repo), "--", *cmd]
@@ -148,7 +154,7 @@ class JobManager:
             self._job = Job(
                 run_id=run_id, repo=repo, out_dir=out_dir, tasks=tasks, limit=limit, force=force,
                 started_at=datetime.now().isoformat(timespec="seconds"), log_path=log_path, proc=proc,
-                git_pull=git_pull, trigger=trigger,
+                git_pull=git_pull, trigger=trigger, concurrency=concurrency,
             )
             return self._job
 
@@ -213,6 +219,28 @@ class JobManager:
                 chunk = b""
         next_offset = offset + len(chunk)
         return {"text": chunk.decode("utf-8", errors="replace"), "offset": next_offset, "eof": next_offset >= size}
+
+    def read_sessions(self, out_dir: Path, run_id: str) -> dict:
+        """runner が書き出したセッション枠の状況。実行中なら各セッションの経過秒数を付ける。"""
+        if not _RUN_ID_RE.match(run_id):
+            raise ValueError(f"run_id が正しくありません: {run_id!r}")
+        path = sessions_path(out_dir, run_id)
+        if not path.is_file():
+            raise FileNotFoundError(run_id)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        # 強制終了された runner は終了を書き出せないため、プロセスの状態で確かめる
+        job = self._job
+        if job is not None and job.run_id == run_id and job.out_dir == out_dir:
+            alive = job.running
+        else:  # 夜間バッチ・コマンドからの実行。出力先のロックで判断する
+            alive = is_locked(out_dir)
+        data["interrupted"] = bool(data.get("running")) and not alive
+        data["running"] = bool(data.get("running")) and alive
+        now = time.time()
+        for session in data.get("sessions", []):
+            started = session.get("started_ts")
+            session["elapsed_s"] = round(now - started) if data["running"] and session.get("busy") and started else None
+        return data
 
     @staticmethod
     def history(out_dir: Path, limit: int = 30) -> list[dict]:

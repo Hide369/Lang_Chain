@@ -170,7 +170,7 @@ EOF
 | `OLLAMA_CONTEXT_LENGTH` | Ollama（systemd） | — | 大きいほどメモリを使い、収まらないと遅くなる |
 | `LLM_NUM_CTX` | `.env` | `262144` | `OLLAMA_CONTEXT_LENGTH` と同じ値にする |
 | `OLLAMA_NUM_PARALLEL` | Ollama（systemd） | — | Ollama が同時に処理する数 |
-| `LLM_CONCURRENCY` | `.env` | `2` | 同時に動かす Claude Code の数。`OLLAMA_NUM_PARALLEL` と揃える |
+| `LLM_CONCURRENCY` | `.env` | `2` | 同時に動かす Claude Code の数（1〜10。Web 画面・`--concurrency` で実行ごとに変えられる）。`OLLAMA_NUM_PARALLEL` と揃える |
 | `OLLAMA_KEEP_ALIVE` | Ollama（systemd） | — | `-1` にしてモデルの再読み込みを防ぐ |
 | `CLAUDE_MAX_TURNS` | `.env` | `30` | 1回の実行のターン数の上限 |
 | `DOC_MAX_ATTEMPTS` | `.env` | `3` | 検証NGのときに作り直す回数の上限 |

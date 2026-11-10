@@ -83,7 +83,7 @@ NG なら終了コード `2`。
 
 ## 4. 並列実行
 
-- 処理対象ごとに非同期ジョブを作り、セマフォで同時実行数を `LLM_CONCURRENCY` に抑える（**タスクをまたいだ合計**。Ollama の `OLLAMA_NUM_PARALLEL` に合わせる）
+- 処理対象ごとに非同期ジョブを作り、同時実行数を `--concurrency`（省略時は `LLM_CONCURRENCY`。1〜10）個のセッション枠で抑える（**タスクをまたいだ合計**。Ollama の `OLLAMA_NUM_PARALLEL` に合わせる）。枠の割り当てと各枠の出来事は [sessions.py](../godoc_agent/sessions.py) が `<out>/_runs/<run_id>.sessions.json` と標準出力（`[S01] ...`）に記録する
 - グラフの状態はチェックポイントとして保存しない。1ファイル×1タスクごとに毎回まっさらな状態から実行する
 - 1件の例外でバッチ全体は止めず、その件を `error` として記録して次へ進む。対象には、Claude Code の異常終了に加えて、UTF-8 で読めないソースファイル・出力先が重なるファイル（拡張子だけが違う同名のソース）・出力ファイルの保存失敗も含む。1件でも `done` 以外があれば終了コードは `1`（Web 画面の表示は「失敗」）のまま
 
@@ -261,3 +261,4 @@ sequenceDiagram
 | `<out>/_commented/.manifest.json` | コメント追記の差分スキップ用ハッシュ |
 | `<out>/_runs/<run_id>.jsonl` | 計測ログ（1ファイル×タスク = 1行） |
 | `<out>/_runs/<run_id>.log` | 標準出力のログ（tmux / nohup / nightly.sh で起動した場合） |
+| `<out>/_runs/<run_id>.sessions.json` | セッション枠の状況（どの枠で何を処理中か・枠ごとの直近の出来事）。Web 画面のセッション欄が読む |

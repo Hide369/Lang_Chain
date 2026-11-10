@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -497,3 +498,100 @@ include = ["web/**"]
     assert logs["web/user.go"]["status"] == "done"
     assert logs["web/user.ts"]["status"] == "error"
     assert "web/詳細設計書_user.md" in logs["web/user.ts"]["error"]
+
+
+# --- 同時セッション数・セッションの記録 ------------------------------------------------------
+
+class ConcurrencyProbeLLM:
+    """同時に何件の claude が動いているかを数える。どのファイルにも合格する設計書を返す。"""
+
+    def __init__(self):
+        self.active = 0
+        self.max_active = 0
+
+    async def ainvoke(self, messages, config=None, **kwargs):
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        await asyncio.sleep(0.05)
+        self.active -= 1
+        return reply(good_doc("Health", "GetUser", "A", "B", "C"))
+
+
+class PerFileLLM:
+    """依頼文に含まれる対象ファイルごとに、用意した応答を順番に返す（並列実行でも決定的にする）。"""
+
+    def __init__(self, responses: dict[str, list]):
+        self._responses = {path: list(items) for path, items in responses.items()}
+
+    async def ainvoke(self, messages, config=None, **kwargs):
+        request = messages[-1].content
+        path = next(p for p in self._responses if p in request)
+        return self._responses[path].pop(0)
+
+
+@pytest.fixture
+def many_files(repo: Path) -> Path:
+    # 既存の2ファイルに加えて、handler 配下に3ファイルを足す（計5件）
+    for name in ("A", "B", "C"):
+        (repo / f"user_api/pkg/handler/{name.lower()}.go").write_text(f"package handler\n\nfunc {name}() {{}}\n", encoding="utf-8")
+    return repo
+
+
+@pytest.mark.parametrize("sessions", ["1", "3", "10"])
+async def test_concurrency_option_limits_simultaneous_sessions(env, monkeypatch, many_files, tmp_path, sessions):
+    llm = ConcurrencyProbeLLM()
+    use_llm(monkeypatch, llm)
+
+    # .env（LLM_CONCURRENCY=1）より --concurrency を優先する
+    assert await run_batch(many_files, tmp_path / "out", "--concurrency", sessions) == 0
+
+    assert llm.max_active == min(int(sessions), 5)
+
+
+@pytest.mark.parametrize("value", ["0", "11", "x"])
+def test_concurrency_option_accepts_only_one_to_ten(value, capsys):
+    with pytest.raises(SystemExit):
+        runner.parse_args(["--repo", ".", "--out", "out", "--concurrency", value])
+    assert "--concurrency" in capsys.readouterr().err
+
+
+async def test_sessions_file_records_each_session_log(env, monkeypatch, repo, tmp_path, capsys):
+    out = tmp_path / "out"
+    # health.go は1回目が検証NGで再生成、user.go は1回で合格（並列に動くため、ファイルごとに応答を決める）
+    use_llm(monkeypatch, PerFileLLM({
+        HEALTH: [reply("識別子の記載なし"), reply(good_doc("Health"))],
+        USER: [reply(good_doc("GetUser"))],
+    }))
+
+    assert await run_batch(repo, out, "--concurrency", "2") == 0
+
+    data = json.loads((out / "_runs" / "r1.sessions.json").read_text(encoding="utf-8"))
+    assert data["running"] is False
+    assert data["concurrency"] == 2
+    assert (data["active"], data["total"], data["finished"]) == (0, 2, 2)
+    assert len(data["sessions"]) == 2
+    assert sum(s["handled"] for s in data["sessions"]) == 2
+    texts = [e["text"] for s in data["sessions"] for e in s["events"]]
+    assert f"開始 doc {HEALTH}" in texts
+    assert "生成 1/3 回目を開始" in texts
+    assert "生成 2/3 回目を開始" in texts
+    assert any(t.startswith("検証NG（") and t.endswith("再生成します") for t in texts)
+    assert "検証OK" in texts
+    assert sum(t.startswith("終了 done") for t in texts) == 2
+    # 同じ出来事は、セッション番号を付けて実行ログ（標準出力）にも出る
+    stdout = capsys.readouterr().out
+    assert "同時セッション数=2" in stdout
+    assert f"] 開始 doc {HEALTH}" in stdout and "[S0" in stdout
+
+
+async def test_sessions_file_marks_run_finished_even_when_files_fail(env, monkeypatch, repo, tmp_path):
+    out = tmp_path / "out"
+    use_llm(monkeypatch, ScriptedLLM([ValueError("boom"), reply(good_doc("GetUser"))]))
+
+    assert await run_batch(repo, out) == 1
+
+    data = json.loads((out / "_runs" / "r1.sessions.json").read_text(encoding="utf-8"))
+    assert data["running"] is False
+    texts = [e["text"] for s in data["sessions"] for e in s["events"]]
+    assert any(t.startswith("生成 1 回目が失敗: ValueError: boom") for t in texts)
+    assert any(t.startswith("終了 error") and "boom" in t for t in texts)

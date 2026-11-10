@@ -6,6 +6,7 @@
 
 import base64
 import binascii
+import json
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -15,6 +16,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
+from ..config import MAX_CONCURRENCY, load_concurrency
 from ..skill_registry import OUTPUT_TYPE_LABELS, OUTPUT_TYPES
 from .auth import LoginThrottle, SessionStore, validate_password_hash, verify_password
 from .git_repo import GitRepoError, inspect_repo
@@ -44,6 +46,8 @@ class RunRequest(BaseModel):
     limit: int = Field(default=0, ge=0, le=100_000)
     force: bool = False
     git_pull: bool = False
+    # 同時に動かす Claude Code のセッション数。省略時は .env の LLM_CONCURRENCY
+    concurrency: int | None = Field(default=None, ge=1, le=MAX_CONCURRENCY)
 
 
 class ScheduleRequest(BaseModel):
@@ -210,10 +214,17 @@ def create_app(
 
     # --- 閲覧 --------------------------------------------------------------------------
 
+    def concurrency_view() -> dict:
+        try:
+            default, error = load_concurrency(), None
+        except ValueError as e:  # .env の値が範囲外。画面で指定すれば実行はできる
+            default, error = None, str(e)
+        return {"default": default, "max": MAX_CONCURRENCY, "error": error}
+
     @app.get("/api/config", dependencies=[Depends(require_viewer)])
     def config() -> dict:
         ws = workspace.get()
-        return {"tasks": task_options(), "workspace": {"repo": ws.repo, "out": ws.out}}
+        return {"tasks": task_options(), "workspace": {"repo": ws.repo, "out": ws.out}, "concurrency": concurrency_view()}
 
     @app.get("/api/status", dependencies=[Depends(require_viewer)])
     def status() -> dict:
@@ -224,17 +235,32 @@ def create_app(
         out = current_out()
         return jobs.history(out) if out else []
 
-    @app.get("/api/runs/{run_id}/log", dependencies=[Depends(require_viewer)])
-    def run_log(run_id: str, offset: int = 0) -> dict:
+    def out_of_run(run_id: str) -> Path:
         job = jobs.current
         # 実行後に出力先を変えても、その実行のログは読めるようにする
-        out = job.out_dir if job is not None and job.run_id == run_id else out_for_view()
+        return job.out_dir if job is not None and job.run_id == run_id else out_for_view()
+
+    @app.get("/api/runs/{run_id}/log", dependencies=[Depends(require_viewer)])
+    def run_log(run_id: str, offset: int = 0) -> dict:
+        out = out_of_run(run_id)
         try:
             return jobs.read_log(out, run_id, offset)
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
         except FileNotFoundError as e:
             raise HTTPException(404, "ログが見つかりません") from e
+
+    @app.get("/api/runs/{run_id}/sessions", dependencies=[Depends(require_viewer)])
+    def run_sessions(run_id: str) -> dict:
+        out = out_of_run(run_id)
+        try:
+            return jobs.read_sessions(out, run_id)
+        except json.JSONDecodeError as e:  # ValueError の一種なので先に捕まえる
+            raise HTTPException(500, f"セッションの記録を読めません: {e}") from e
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        except FileNotFoundError as e:
+            raise HTTPException(404, "セッションの記録がありません（この機能より前の実行です）") from e
 
     @app.get("/api/outputs", dependencies=[Depends(require_viewer)])
     def outputs() -> list[dict]:
@@ -270,7 +296,7 @@ def create_app(
         if body.git_pull:
             check_pullable(repo)
         try:
-            job = jobs.start(repo, out, tasks, body.limit, body.force, git_pull=body.git_pull)
+            job = jobs.start(repo, out, tasks, body.limit, body.force, git_pull=body.git_pull, concurrency=body.concurrency)
         except JobBusy as e:
             raise HTTPException(409, str(e)) from e
         return job.to_dict()

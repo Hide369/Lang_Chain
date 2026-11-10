@@ -7,7 +7,7 @@ from pathlib import Path
 from .targets import TargetConfig, load_targets
 
 
-def _int_env(name: str, default: int, minimum: int = 1) -> int:
+def _int_env(name: str, default: int, minimum: int = 1, maximum: int | None = None) -> int:
     raw = os.getenv(name, str(default))
     try:
         value = int(raw)
@@ -15,7 +15,20 @@ def _int_env(name: str, default: int, minimum: int = 1) -> int:
         raise ValueError(f"環境変数 {name} は整数で指定してください: {raw!r}") from e
     if value < minimum:
         raise ValueError(f"環境変数 {name} は {minimum} 以上で指定してください: {value}")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"環境変数 {name} は {maximum} 以下で指定してください: {value}")
     return value
+
+
+# 同時に動かす Claude Code のセッション数の上限。Ollama の並列数（OLLAMA_NUM_PARALLEL）と
+# GPU メモリ（並列数に比例して KV キャッシュが増える）の現実的な範囲に抑える
+MAX_CONCURRENCY = 10
+DEFAULT_CONCURRENCY = 2
+
+
+def load_concurrency() -> int:
+    """同時セッション数の既定値（LLM_CONCURRENCY）。1〜MAX_CONCURRENCY。"""
+    return _int_env("LLM_CONCURRENCY", DEFAULT_CONCURRENCY, maximum=MAX_CONCURRENCY)
 
 
 def _ratio_env(name: str, default: float) -> float:
@@ -104,7 +117,7 @@ def load_settings() -> Settings:
         num_ctx=_int_env("LLM_NUM_CTX", 262144, minimum=4096),
         ctx_warn_ratio=_ratio_env("LLM_CTX_WARN_RATIO", 0.9),
         num_predict=_int_env("LLM_NUM_PREDICT", 8192),
-        concurrency=_int_env("LLM_CONCURRENCY", 2),
+        concurrency=load_concurrency(),
         max_attempts=_int_env("DOC_MAX_ATTEMPTS", 3),
         claude_bin=os.getenv("CLAUDE_BIN", "claude"),
         claude_skill_path=design_skill_path(base_dir),
