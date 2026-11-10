@@ -14,6 +14,7 @@ import time
 from typing import Literal, Protocol, TypedDict
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
 from .analyzers import extract_facts
@@ -27,6 +28,16 @@ Status = Literal["pending", "done", "too_large", "failed_validation"]
 
 class ChatModel(Protocol):
     async def ainvoke(self, messages: list[AnyMessage]) -> AIMessage: ...
+
+
+class SessionObserver(Protocol):
+    """処理の進み具合を受け取る相手（runner のセッション枠）。config["configurable"]["session"] で渡す。"""
+
+    def log(self, text: str, *, attempt: int | None = None) -> None: ...
+
+
+def _observer(config: RunnableConfig | None) -> SessionObserver | None:
+    return ((config or {}).get("configurable") or {}).get("session")
 
 
 class DocState(TypedDict, total=False):
@@ -95,20 +106,38 @@ def build_doc_graph(llm: ChatModel, task: Task, *, max_attempts: int) -> StateGr
             "status": "pending",
         }
 
-    async def generate(state: DocState) -> DocState:
+    async def generate(state: DocState, config: RunnableConfig) -> DocState:
+        observer = _observer(config)
+        attempt = state["attempts"] + 1
+        if observer:
+            observer.log(f"生成 {attempt}/{max_attempts} 回目を開始", attempt=attempt)
         started = time.perf_counter()
-        response = await llm.ainvoke(state["messages"])
+        try:
+            response = await llm.ainvoke(state["messages"])
+        except Exception as e:
+            if observer:
+                observer.log(f"生成 {attempt} 回目が失敗: {type(e).__name__}: {e}"[:500])
+            raise
         metrics = _call_metrics(response, time.perf_counter() - started)
+        if observer:
+            observer.log(f"生成 {attempt} 回目が完了（{metrics['elapsed_s']:.0f}秒・{metrics['num_turns'] or '?'}ターン）")
         return {
             "draft": _strip_fence(response.content),
             "attempts": state["attempts"] + 1,
             "llm_calls": state["llm_calls"] + [metrics],
         }
 
-    def validate(state: DocState) -> DocState:
+    def validate(state: DocState, config: RunnableConfig) -> DocState:
+        observer = _observer(config)
         issues = task.find_issues(state["draft"], state["source"], state["exported"])
         if not issues:
+            if observer:
+                observer.log("検証OK")
             return {"status": "done", "issues": []}
+        if observer:
+            summary = "; ".join(issues)[:300]
+            next_step = "再生成します" if state["attempts"] < max_attempts else "上限に達しました"
+            observer.log(f"検証NG（{len(issues)} 件: {summary}）→ {next_step}")
         if state["attempts"] >= max_attempts:
             return {"status": "failed_validation", "issues": issues}
         return {

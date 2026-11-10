@@ -94,6 +94,20 @@
   .picker-menu label { display: flex; gap: 8px; align-items: center; margin: 0; padding: 4px 6px; border-radius: 4px; white-space: nowrap; }
   .picker-menu label:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
   .picker-menu label .small { margin-left: auto; padding-left: 12px; }
+  /* セッション（同時に動く Claude Code）の占有状況 */
+  .meter { display: grid; grid-template-columns: repeat(var(--slots, 1), minmax(0, 1fr)); gap: 4px; height: 14px; margin: 2px 0 12px; }
+  .meter span { border-radius: 3px; background: color-mix(in srgb, var(--muted) 22%, transparent); }
+  .meter span.on { background: var(--accent); }
+  .meter span.stale { background: var(--warn); }
+  .slots { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+  .slot { display: flex; flex-direction: column; gap: 2px; min-width: 0; text-align: left; padding: 8px 10px;
+          border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+  .slot.busy { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 7%, var(--panel)); }
+  .slot.stale { border-color: var(--warn); }
+  .slot[aria-pressed=true] { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .slot-head { display: flex; justify-content: space-between; align-items: center; gap: 6px; font-weight: 600; }
+  .slot .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #session-log { height: 220px; margin-top: 6px; }
 </style>
 </head>
 <body>
@@ -178,6 +192,11 @@
         <input id="limit" type="number" min="0" value="0" data-admin> <span class="muted">0 = すべて</span>
       </div>
       <div class="row">
+        <span class="label">同時セッション</span>
+        <input id="concurrency" type="number" min="1" max="10" step="1" data-admin>
+        <span id="concurrency-note" class="muted small">1〜10。同時に動かす Claude Code の数（Ollama の OLLAMA_NUM_PARALLEL より多くしても速くはなりません）</span>
+      </div>
+      <div class="row">
         <span class="label">再生成</span>
         <label><input id="force" type="checkbox" data-admin> 変更のないファイルも作り直す（版が上がります）</label>
       </div>
@@ -198,6 +217,20 @@
     <h2>状態</h2>
     <div id="status" class="row"></div>
     <div class="row muted small mono" id="status-detail"></div>
+  </section>
+
+  <section class="wide" id="sessions-section">
+    <div class="row" style="justify-content:space-between;margin-bottom:4px">
+      <h2 style="margin:0">セッション <span id="sessions-title" class="muted mono small"></span></h2>
+      <span id="sessions-summary" class="small"></span>
+    </div>
+    <div id="sessions-meter" class="meter" role="img"></div>
+    <div id="sessions-grid" class="slots"></div>
+    <p id="sessions-empty" class="muted small" style="margin:0"></p>
+    <div id="session-log-wrap" class="hidden" style="margin-top:12px">
+      <h3 style="margin:0">セッションログ <span id="session-log-title" class="muted mono"></span></h3>
+      <pre id="session-log"></pre>
+    </div>
   </section>
 
   <section class="wide">

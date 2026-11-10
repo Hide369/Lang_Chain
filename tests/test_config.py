@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from godoc_agent import config
-from godoc_agent.config import comment_skill_path, load_settings, targets_config_path
+from godoc_agent.config import MAX_CONCURRENCY, comment_skill_path, load_settings, targets_config_path
 
 REPO_ROOT = Path(config.__file__).resolve().parent.parent
 
@@ -62,3 +62,16 @@ def test_comment_skill_is_used_when_placed_in_default_folder(tmp_path, monkeypat
     # .env での指定があれば、そちらを優先する
     monkeypatch.setenv("CLAUDE_COMMENT_SKILL_PATH", str(tmp_path / "other" / "SKILL.md"))
     assert comment_skill_path(tmp_path) == tmp_path / "other" / "SKILL.md"
+
+
+def test_concurrency_allows_up_to_ten_sessions(monkeypatch):
+    monkeypatch.setenv("LLM_CONCURRENCY", str(MAX_CONCURRENCY))
+    assert MAX_CONCURRENCY == 10
+    assert load_settings().concurrency == 10
+
+
+@pytest.mark.parametrize("value", ["0", "11"])
+def test_concurrency_outside_one_to_ten_fails_at_startup(monkeypatch, value):
+    monkeypatch.setenv("LLM_CONCURRENCY", value)
+    with pytest.raises(ValueError, match="LLM_CONCURRENCY"):
+        load_settings()

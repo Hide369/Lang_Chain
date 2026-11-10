@@ -2,6 +2,7 @@ import base64
 import shutil
 import sys
 import tomllib
+from contextlib import AsyncExitStack
 from datetime import datetime
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from godoc_agent.runlock import run_lock
+from godoc_agent.sessions import SessionBoard, sessions_path
 from godoc_agent.skill_registry import COMMENT, DOC, read_registry
 from godoc_agent.web.app import CSRF_HEADER, CSRF_VALUE, create_app
 from godoc_agent.web.auth import LoginThrottle, hash_password, verify_password
@@ -204,11 +206,13 @@ def test_admin_only_endpoints_reject_viewers(client, method, path):
     assert res.status_code == 401
 
 
-def test_viewer_can_see_status_config_and_targets(client):
+def test_viewer_can_see_status_config_and_targets(client, monkeypatch):
+    monkeypatch.setenv("LLM_CONCURRENCY", "3")
     assert client.get("/api/status").status_code == 200
     assert client.get("/api/config").json() == {
         "tasks": [{"name": "doc", "label": "設計書", "type": "document"}],
         "workspace": {"repo": None, "out": None},
+        "concurrency": {"default": 3, "max": 10, "error": None},
     }
     assert client.get("/api/targets").status_code == 200
 
@@ -338,7 +342,7 @@ def test_failed_run_reports_exit_code(admin, jobs, monkeypatch):
     assert admin.get("/api/status").json()["job"]["exit_code"] == 1
 
 
-@pytest.mark.parametrize("body", [{"tasks": ["unknown"]}, {"limit": -1}])
+@pytest.mark.parametrize("body", [{"tasks": ["unknown"]}, {"limit": -1}, {"concurrency": 0}, {"concurrency": 11}])
 def test_invalid_run_requests_are_rejected(admin, body):
     assert admin.post("/api/runs", json=body, headers=CSRF).status_code in (400, 422)
 
@@ -589,3 +593,79 @@ def test_targets_config_path_not_created_yet_shows_example(client, app_dir, tmp_
     assert res.status_code == 200
     assert res.json()["is_example"] is True
     assert res.json()["write_path"] == str(tmp_path / "conf" / "targets.toml")
+
+
+# --- セッション（同時に動く Claude Code）-------------------------------------------------------
+
+def test_run_passes_session_count_to_runner(admin, jobs):
+    res = start_run(admin, concurrency=10)
+    assert res.status_code == 202
+    assert res.json()["concurrency"] == 10
+    wait_finished(jobs)
+    log = admin.get(f"/api/runs/{res.json()['run_id']}/log").json()["text"]
+    assert "--concurrency 10" in log
+
+
+def test_run_without_session_count_uses_env_default(admin, jobs):
+    res = start_run(admin)
+    wait_finished(jobs)
+    assert res.json()["concurrency"] is None
+    assert "--concurrency" not in admin.get(f"/api/runs/{res.json()['run_id']}/log").json()["text"]
+
+
+def test_config_reports_invalid_env_session_count(client, monkeypatch):
+    monkeypatch.setenv("LLM_CONCURRENCY", "11")
+    concurrency = client.get("/api/config").json()["concurrency"]
+    assert concurrency["default"] is None
+    assert "LLM_CONCURRENCY" in concurrency["error"]
+
+
+async def write_board(out_dir: Path, run_id: str, concurrency: int, busy: list[str]) -> tuple[SessionBoard, AsyncExitStack]:
+    """runner の途中の状態を作る（busy のファイルを処理中にする）。枠は返した stack を閉じるまで占有したまま。"""
+    board = SessionBoard(sessions_path(out_dir.resolve(), run_id), run_id, concurrency, total=len(busy) + 1, echo=lambda _: None)
+    stack = AsyncExitStack()
+    for rel_path in busy:
+        session = await stack.enter_async_context(board.session("doc", rel_path))
+        session.log("生成 1/3 回目を開始", attempt=1)
+    return board, stack
+
+
+async def test_sessions_show_occupied_slots_and_per_session_log_while_running(admin, out_dir):
+    _, stack = await write_board(out_dir, "r1", 10, ["a.go", "b.go", "c.go"])
+    async with stack:
+        with run_lock(out_dir.resolve()):  # 夜間バッチ・コマンドからの実行が動いている
+            data = admin.get("/api/runs/r1/sessions").json()
+    assert data["running"] is True and data["interrupted"] is False
+    assert data["concurrency"] == 10
+    assert data["active"] == 3
+    busy = [s for s in data["sessions"] if s["busy"]]
+    assert [s["rel_path"] for s in busy] == ["a.go", "b.go", "c.go"]
+    assert busy[0]["attempt"] == 1
+    assert busy[0]["elapsed_s"] is not None
+    assert [e["text"] for e in busy[0]["events"]] == ["開始 doc a.go", "生成 1/3 回目を開始"]
+
+
+async def test_sessions_of_killed_runner_are_reported_as_interrupted(admin, out_dir):
+    _, stack = await write_board(out_dir, "r1", 2, ["a.go"])  # 終了を書き出さずに止まった
+    async with stack:
+        data = admin.get("/api/runs/r1/sessions").json()
+    assert data["running"] is False
+    assert data["interrupted"] is True
+    assert all(s["elapsed_s"] is None for s in data["sessions"])
+
+
+async def test_sessions_of_finished_run(admin, out_dir):
+    board, stack = await write_board(out_dir, "r1", 2, ["a.go"])
+    await stack.aclose()
+    board.close()
+    data = admin.get("/api/runs/r1/sessions").json()
+    assert data["running"] is False and data["interrupted"] is False
+    assert data["active"] == 0 and data["finished"] == 1
+
+
+def test_sessions_missing_invalid_or_broken(admin, out_dir):
+    assert admin.get("/api/runs/nope/sessions").status_code == 404
+    assert admin.get("/api/runs/..%2Fsecret/sessions").status_code in (400, 404)
+    (out_dir / "_runs").mkdir(parents=True, exist_ok=True)
+    (out_dir / "_runs" / "r1.sessions.json").write_text("{broken", encoding="utf-8")
+    assert admin.get("/api/runs/r1/sessions").status_code == 500

@@ -13,6 +13,7 @@ const state = {
   running: false,
   logRunId: null,   // ログ欄に表示中の run_id
   logOffset: 0,
+  sessionSlot: null, // セッションログを表示中の枠の番号（null は非表示）
   following: true,  // 実行中のジョブのログを追いかけるか（履歴を選ぶと止める）
   outputs: [],
   targets: null,    // サーバーから読んだ対象の設定
@@ -254,6 +255,15 @@ async function loadConfig() {
   // 初回は組み込みのスキル（設計書・コメント追記）を選んでおく。2回目以降は選択を引き継ぐ
   const selected = (before ?? ["doc", "comment"]).filter((n) => names.includes(n));
   renderPicker($("tasks"), config.tasks, selected);
+  renderConcurrency(config.concurrency);
+}
+
+function renderConcurrency({ default: fallback, max, error }) {
+  const input = $("concurrency");
+  input.max = String(max);
+  // 入力中の値は残し、未入力のときだけ .env の既定値を入れる
+  if (input.value === "" && fallback != null) input.value = String(fallback);
+  if (error) message("concurrency-note", `.env の設定に誤りがあります（${error}）。ここで 1〜${max} を指定してください`);
 }
 
 $("run-form").addEventListener("submit", async (e) => {
@@ -268,6 +278,7 @@ $("run-form").addEventListener("submit", async (e) => {
   try {
     const job = await send("POST", "/api/runs", {
       tasks, limit: Number($("limit").value) || 0, force: $("force").checked, git_pull: $("git-pull").checked,
+      concurrency: Number($("concurrency").value) || null,  // 未入力なら .env の LLM_CONCURRENCY
     });
     followRun(job.run_id);
     await refreshStatus();
@@ -351,6 +362,7 @@ async function refreshStatus() {
   $("status-detail").textContent = job
     ? `${job.trigger === "scheduled" ? "定期実行" : "手動"} / run_id=${job.run_id} / ${job.tasks.map(taskLabel).join("・") || "既定のタスク"}`
       + `${job.limit ? ` / 上限 ${job.limit} 件` : ""}${job.force ? " / 再生成" : ""}${job.git_pull ? " / git pull" : ""}`
+      + ` / 同時 ${job.concurrency ?? "既定数の"} セッション`
       + ` / 開始 ${fmtTime(job.started_at)}${job.finished_at ? ` / 終了 ${fmtTime(job.finished_at)}` : ""}`
       + `\n対象 ${job.repo}\n出力 ${job.out}`
     : "";
@@ -371,6 +383,7 @@ function followRun(runId) {
 }
 
 function showLog(runId) {
+  if (state.logRunId !== runId) state.sessionSlot = null;
   state.logRunId = runId;
   state.logOffset = 0;
   $("log").textContent = "";
@@ -401,6 +414,105 @@ async function pollLog() {
   }
 }
 
+// --- セッション（同時に動く Claude Code の枠）------------------------------------------------------
+
+function fmtDuration(seconds) {
+  if (seconds == null) return "";
+  const m = Math.floor(seconds / 60);
+  return m ? `${m}分${String(seconds % 60).padStart(2, "0")}秒` : `${seconds}秒`;
+}
+
+function fmtClock(iso) {
+  return iso ? iso.slice(11, 19) : "";
+}
+
+async function refreshSessions() {
+  const runId = state.logRunId;
+  if (!runId) {
+    renderSessionsEmpty("実行を開始するか、実行履歴から選ぶと表示します");
+    return;
+  }
+  let data;
+  try {
+    data = await api(`/api/runs/${encodeURIComponent(runId)}/sessions`);
+  } catch (err) {
+    if (state.logRunId !== runId) return;
+    // runner が枠を用意する前（対象の列挙中）や、この機能より前の実行は記録がない
+    renderSessionsEmpty(err.status === 404 ? "この実行にはセッションの記録がありません（開始直後・対象が0件・以前の版での実行）" : err.message);
+    return;
+  }
+  if (state.logRunId !== runId) return;
+  renderSessions(data);
+}
+
+function renderSessionsEmpty(text) {
+  $("sessions-title").textContent = state.logRunId ?? "";
+  $("sessions-summary").textContent = "";
+  $("sessions-meter").replaceChildren();
+  $("sessions-grid").replaceChildren();
+  $("sessions-empty").textContent = text;
+  $("session-log-wrap").classList.add("hidden");
+}
+
+function renderSessions(data) {
+  const stale = data.interrupted;
+  const waiting = Math.max(data.total - data.finished - data.active, 0);
+  $("sessions-title").textContent = data.run_id;
+  $("sessions-empty").textContent = stale ? "runner が途中で止まったため、処理中だった枠は中断されています" : "";
+  $("sessions-summary").replaceChildren(
+    badge(`使用中 ${data.active} / ${data.concurrency}`, data.running ? "running" : stale ? "warn" : "idle"),
+    ` 完了 ${data.finished} / ${data.total} 件${data.running ? ` ・ 待ち ${waiting} 件` : ""}`,
+  );
+
+  // 占有メーター：1マス = 1セッション枠
+  const meter = $("sessions-meter");
+  meter.style.setProperty("--slots", data.concurrency);
+  meter.setAttribute("aria-label", `使用中 ${data.active} / ${data.concurrency} セッション`);
+  meter.replaceChildren(...data.sessions.map((s) => {
+    const cell = el("span", { title: `S${String(s.slot).padStart(2, "0")}${s.busy ? ` ${s.rel_path}` : " 空き"}` });
+    if (s.busy) cell.classList.add(stale ? "stale" : "on");
+    return cell;
+  }));
+
+  $("sessions-grid").replaceChildren(...data.sessions.map((s) => sessionCard(s, stale)));
+  renderSessionLog(data.sessions.find((s) => s.slot === state.sessionSlot));
+}
+
+function sessionCard(s, stale) {
+  const name = `S${String(s.slot).padStart(2, "0")}`;
+  const status = s.busy ? (stale ? badge("中断", "warn") : badge("実行中", "running")) : badge("空き", "idle");
+  const last = s.events.at(-1);
+  const card = el("button", { type: "button", className: `slot${s.busy ? " busy" : ""}${s.busy && stale ? " stale" : ""}` },
+    el("span", { className: "slot-head" }, el("span", { className: "mono", textContent: name }), status),
+    s.busy
+      ? el("span", { className: "mono small ellipsis", textContent: s.rel_path, title: s.rel_path })
+      : el("span", { className: "muted small", textContent: `処理済み ${s.handled} 件` }),
+    s.busy
+      ? el("span", { className: "small", textContent:
+          `${taskLabel(s.task)} ・ 生成 ${s.attempt || "-"} 回目${s.elapsed_s != null ? ` ・ ${fmtDuration(s.elapsed_s)}` : ""}` })
+      : null,
+    last ? el("span", { className: "muted small ellipsis", textContent: `${fmtClock(last.at)} ${last.text}`, title: last.text }) : null);
+  card.setAttribute("aria-pressed", String(state.sessionSlot === s.slot));
+  card.addEventListener("click", () => {
+    state.sessionSlot = state.sessionSlot === s.slot ? null : s.slot;
+    refreshSessions();
+  });
+  return card;
+}
+
+function renderSessionLog(session) {
+  $("session-log-wrap").classList.toggle("hidden", !session);
+  if (!session) return;
+  $("session-log-title").textContent = `S${String(session.slot).padStart(2, "0")}（直近 ${session.events.length} 件）`;
+  const box = $("session-log");
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  const text = session.events.map((e) => `${fmtClock(e.at)}  ${e.text}`).join("\n") || "（まだ記録はありません）";
+  if (box.textContent !== text) {
+    box.textContent = text;
+    if (atBottom) box.scrollTop = box.scrollHeight;
+  }
+}
+
 // --- 履歴・生成物 ---------------------------------------------------------------------------
 
 async function refreshHistory() {
@@ -408,7 +520,7 @@ async function refreshHistory() {
   $("history").replaceChildren(...runs.map((run) => {
     const counts = Object.entries(run.counts).map(([k, v]) => `${k}=${v}`).join(" ");
     const name = run.has_log
-      ? el("a", { textContent: run.run_id, onclick: () => { state.following = false; showLog(run.run_id); pollLog(); } })
+      ? el("a", { textContent: run.run_id, onclick: () => { state.following = false; showLog(run.run_id); pollLog(); refreshSessions(); } })
       : el("span", { textContent: run.run_id });
     const row = el("tr", {},
       el("td", { className: "mono" }, name),
@@ -721,7 +833,7 @@ let timer = null;
 async function tick() {
   try {
     const job = await refreshStatus();
-    await pollLog();
+    await Promise.all([pollLog(), refreshSessions()]);
     // ジョブが変わった（定期実行が始まった）・終わったら、履歴・生成物・定期実行の次回予定を読み直す。
     // 短い実行は確認の間に始まって終わることがあるため、「実行中→終了」ではなく run_id と状態の変化で判断する。
     // 定期実行の入力欄は、入力中の内容を消さないよう書き換えない

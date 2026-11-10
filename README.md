@@ -46,6 +46,7 @@ generate の中身（ファイルごと）:
 | [godoc_agent/tasks.py](godoc_agent/tasks.py) | タスク（設計書・コメント追記・追加のスキル）ごとのプロンプト・検証・出力先の定義 |
 | [godoc_agent/skill_registry.py](godoc_agent/skill_registry.py) | 登録済みのスキル（組み込みの設計書・コメント追記と、skills/registry.json に登録した追加のスキル）の一覧 |
 | [godoc_agent/runner.py](godoc_agent/runner.py) | バッチ実行、並列数制御、差分スキップ、計測ログ |
+| [godoc_agent/sessions.py](godoc_agent/sessions.py) | 同時に動くセッション（最大10）の枠の割り当てと、枠ごとの状況の記録（Web 画面のセッション欄が表示する） |
 | [godoc_agent/claude_code.py](godoc_agent/claude_code.py) | `claude -p` の起動（呼び出しごとに新しいセッション）、Ollama への接続設定 |
 | [godoc_agent/prompts.py](godoc_agent/prompts.py) | SKILL.md の読み込みと、エージェントへの指示の組み立て |
 | [godoc_agent/targets.py](godoc_agent/targets.py) | 対象の設定ファイル（targets.toml）の読み込みと、対象ファイルの列挙 |
@@ -56,6 +57,7 @@ generate の中身（ファイルごと）:
 起動から終了までの処理の流れ（検証・保存・終了コードなど）は [docs/workflow.md](docs/workflow.md) にまとめている。
 処理対象の言語・フォルダ・ファイル・除外を変える手順は [docs/target_files.md](docs/target_files.md) にまとめている。
 処理が遅いときの切り分け（原因の候補・計測ログの集計方法・関係する設定）は [docs/performance_troubleshooting.md](docs/performance_troubleshooting.md) にまとめている。
+対象フォルダをネットワーク上の NAS にする手順（マウント・サービスの設定・git pull・元に戻す方法）は [docs/nas_target.md](docs/nas_target.md) にまとめている。
 以前の版（Go 専用）からサーバーを入れ替える手順は [docs/migration_multi_language.md](docs/migration_multi_language.md) にまとめている。
 チェックポイント廃止・再生成の見直し版（PR #21）への入れ替え手順は [docs/migration_drop_checkpointer.md](docs/migration_drop_checkpointer.md) にまとめている。
 Web 画面版（PR #23・#24）への入れ替え手順（夜間タイマーからの切り替え・GitLab の認証を含む）は [docs/migration_web_ui.md](docs/migration_web_ui.md) にまとめている。
@@ -208,7 +210,7 @@ python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --tasks doc,tes
 ```
 
 - `--limit` はファイル×タスクの件数で数える（両方のタスクを実行する場合、`--limit 5` は約2.5ファイル分）
-- 並列数（`LLM_CONCURRENCY`）はタスクをまたいだ合計。両方のタスクを実行すると Claude Code の実行回数はおよそ2倍になる
+- 並列数（`LLM_CONCURRENCY`。1〜10、`--concurrency` で実行ごとに変えられる）はタスクをまたいだ合計。両方のタスクを実行すると Claude Code の実行回数はおよそ2倍になる
 
 終了コード: `0` 全件成功 / `1` 一部失敗（詳細は計測ログ） / `2` 設定・接続エラー、または同じ出力先で別の実行が進行中のため開始できず
 

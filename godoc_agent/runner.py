@@ -7,6 +7,7 @@
     python -m godoc_agent.runner --repo /path/to/repo --out ./out --limit 5
     python -m godoc_agent.runner --repo /path/to/repo --out ./out  # 再実行: 生成済み・変更なしのファイルは飛ばす
     python -m godoc_agent.runner --repo /path/to/repo --out ./out --tasks comment         # コメント追記だけ
+    python -m godoc_agent.runner --repo /path/to/repo --out ./out --concurrency 4         # 同時に4セッション
 """
 
 import argparse
@@ -22,12 +23,13 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from .claude_code import build_claude_code
-from .config import APP_DIR, Settings, load_settings
+from .config import APP_DIR, MAX_CONCURRENCY, Settings, load_settings
 from .doc_graph import build_doc_graph
 from .source_common import sha256_text
 from .preflight import preflight
 from .prompts import load_skill
 from .runlock import run_lock
+from .sessions import SessionBoard, sessions_path
 from .targets import discover_source_files
 from .skill_registry import COMMENT, DOC, find_skill
 from .tasks import Task, build_skill_task
@@ -82,11 +84,12 @@ class TaskRun:
 
 
 async def process_file(
-    run: TaskRun, sem: asyncio.Semaphore, rel_path: str, language: str, source: str, source_hash: str, out_dir: Path,
+    run: TaskRun, board: SessionBoard, rel_path: str, language: str, source: str, source_hash: str, out_dir: Path,
 ) -> FileResult:
     task = run.task
-    config = {"run_name": f"{task.run_name}:{rel_path}"}
-    async with sem:
+    # 同時に動く claude の数は、空いたセッション枠の数で抑える（枠が空くまで待つ）
+    async with board.session(task.name, rel_path) as session:
+        config = {"run_name": f"{task.run_name}:{rel_path}", "configurable": {"session": session}}
         started = time.perf_counter()  # 待ち時間を含めず、処理時間だけを計測する
         try:
             # 既存の設計書があれば渡し、履歴（バージョン）を引き継いで改訂させる
@@ -103,22 +106,25 @@ async def process_file(
                 {"rel_path": rel_path, "language": language, "source": source, "previous_output": previous_output}, config
             )
         except Exception as e:  # 1件の失敗でバッチ全体を止めず、記録して次へ進む
-            return FileResult(
+            result = FileResult(
                 task=task.name, rel_path=rel_path, source_hash=source_hash, status="error",
                 duration_s=time.perf_counter() - started, error=f"{type(e).__name__}: {e}",
             )
-
-    return FileResult(
-        task=task.name,
-        rel_path=rel_path,
-        source_hash=source_hash,
-        status=state.get("status", "error"),
-        duration_s=time.perf_counter() - started,
-        attempts=state.get("attempts", 0),
-        issues=state.get("issues"),
-        llm_calls=state.get("llm_calls"),
-        draft=state.get("draft"),
-    )
+        else:
+            result = FileResult(
+                task=task.name,
+                rel_path=rel_path,
+                source_hash=source_hash,
+                status=state.get("status", "error"),
+                duration_s=time.perf_counter() - started,
+                attempts=state.get("attempts", 0),
+                issues=state.get("issues"),
+                llm_calls=state.get("llm_calls"),
+                draft=state.get("draft"),
+            )
+        detail = f"（{result.error or '; '.join(result.issues or [])}）"[:300] if result.status != "done" else ""
+        session.log(f"終了 {result.status} {result.duration_s:.0f}秒{detail}")
+    return result
 
 
 def migrate_legacy_output(task: Task, out_dir: Path, rel_path: str) -> None:
@@ -292,8 +298,9 @@ async def _run_batch(args: argparse.Namespace, settings: Settings, repo: Path, o
     if targets:  # 読み込めないファイルだけのときは、Ollama に接続できなくても結果を記録できるようにする
         await preflight(settings)
     metrics_path = out_dir / "_runs" / f"{args.run_id}.jsonl"
-    # 同時に動く claude の数はタスクをまたいで LLM_CONCURRENCY に抑える（Ollama の並列数に合わせるため）
-    sem = asyncio.Semaphore(settings.concurrency)
+    # 同時に動く claude の数（セッション枠の数）はタスクをまたいだ合計で抑える（Ollama の並列数に合わせるため）
+    concurrency = args.concurrency or settings.concurrency
+    print(f"同時セッション数={concurrency}", flush=True)
     results: list[FileResult] = []
     started = time.perf_counter()
 
@@ -305,18 +312,21 @@ async def _run_batch(args: argparse.Namespace, settings: Settings, repo: Path, o
         )
         for task, _ in tasks
     }
-    jobs = [
-        asyncio.create_task(process_file(runs[task.name], sem, rel_path, language, source, source_hash, out_dir))
-        for task, rel_path, language, source, source_hash in targets
-    ]
 
-    async def finished_results():
-        for result in failed_early:
-            yield result
-        for finished in asyncio.as_completed(jobs):
-            yield await finished
+    # 抜けるとき（失敗・中断を含む）に、Web 画面が実行中の表示をやめられるよう終了を記録する
+    board = SessionBoard(sessions_path(out_dir, args.run_id), args.run_id, concurrency, len(targets))
+    with board, metrics_path.open("a", encoding="utf-8") as metrics_file:
+        jobs = [
+            asyncio.create_task(process_file(runs[task.name], board, rel_path, language, source, source_hash, out_dir))
+            for task, rel_path, language, source, source_hash in targets
+        ]
 
-    with metrics_path.open("a", encoding="utf-8") as metrics_file:
+        async def finished_results():
+            for result in failed_early:
+                yield result
+            for finished in asyncio.as_completed(jobs):
+                yield await finished
+
         i = 0
         async for result in finished_results():
             i += 1
@@ -347,6 +357,16 @@ def _task_list(value: str) -> list[str]:
     return list(dict.fromkeys(names))
 
 
+def _concurrency(value: str) -> int:
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"整数で指定してください: {value!r}") from None
+    if not 1 <= n <= MAX_CONCURRENCY:
+        raise argparse.ArgumentTypeError(f"1〜{MAX_CONCURRENCY} で指定してください: {n}")
+    return n
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="ソースファイルから詳細設計書の生成・コメント追記を一括で行う")
     p.add_argument("--repo", type=Path, required=True, help="対象リポジトリのルート")
@@ -358,6 +378,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--limit", type=int, default=0, help="処理件数の上限（PoC用。ファイル×タスクの件数）")
     p.add_argument("--force", action="store_true", help="変更のないファイルも再生成する")
+    p.add_argument(
+        "--concurrency", type=_concurrency, default=None,
+        help=f"同時に動かす Claude Code のセッション数（1〜{MAX_CONCURRENCY}）。省略時は .env の LLM_CONCURRENCY",
+    )
     return p.parse_args(argv)
 
 
