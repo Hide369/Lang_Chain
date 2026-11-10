@@ -43,8 +43,9 @@
 
 すでに設計書の生成（コマンド・夜間タイマー）が動いているサーバーに追加する場合は、[migration_web_ui.md](migration_web_ui.md) の手順で行う（夜間タイマーからの切り替え・GitLab の認証・元に戻す方法を含む）。
 
+コマンドは GB10 の端末で実行する（SSH は使えないため、GB10 に直接ログインした端末を使う）。
+
 ```bash
-ssh gb10
 cd /opt/Lang_Chain
 git pull
 .venv/bin/pip install -r requirements.txt     # fastapi・uvicorn が追加された
@@ -67,7 +68,7 @@ EOF
 .venv/bin/python -m godoc_agent.web
 #    クライアント PC のブラウザで http://192.168.31.26:4000 を開く
 
-# 4. 常駐させる（sudo が必要。自分のターミナルから ssh -t gb10 で実行する）
+# 4. 常駐させる（sudo が必要）
 sudo cp deploy/systemd/godoc-web.service /etc/systemd/system/
 sudo sed -i "s/REPLACE_WITH_USER/$USER/" /etc/systemd/system/godoc-web.service
 sudo systemctl daemon-reload
@@ -143,7 +144,7 @@ sudo ufw allow from 192.168.31.0/24 to any port 4000 proto tcp
 - フォルダ未設定などで開始できなかった場合は、画面の「前回」に理由が表示され、翌日に再び試す
 - run_id は `scheduled-<日時>`。実行履歴・ログは手動の実行と同じように見られる。開始・失敗はサーバーのログ（`journalctl -u godoc-web.service`）にも残る
 - 設定は `state/web/schedule.json` に保存される
-- git pull は Web 画面の実行ユーザー（godoc-web.service の `User=`）で行う。そのユーザーで、パスワード入力なしで `git pull` できるようにしておく（SSH 鍵・デプロイキーなど）
+- git pull は Web 画面の実行ユーザー（godoc-web.service の `User=`）で行う。そのユーザーで、パスワード入力なしで `git pull` できるようにしておく（[GitLab の認証（HTTPS とアクセストークン）](#gitlab-の認証https-とアクセストークン)）
 
 ### 実行前の git pull
 
@@ -160,18 +161,51 @@ sudo ufw allow from 192.168.31.0/24 to any port 4000 proto tcp
 
 pull の前に、pull 先の URL・追跡ブランチ（例：`origin/main`）・リポジトリのフォルダをログに出す。URL に含まれる認証情報（`https://oauth2:<トークン>@...` など）は `***` に伏せる。
 
-pull はパスワード入力なしで通る必要がある（入力待ちで止まらないよう、git に尋ねさせない）。GitLab の場合は次のどちらかを、Web 画面の実行ユーザー（godoc-web.service の `User=`）に設定しておく。
-
-- SSH（推奨）：プロジェクトに読み取り専用の**デプロイキー**を登録し、実行ユーザーの `~/.ssh` に秘密鍵を置く。初回は `ssh -T git@<GitLabのホスト>` で `known_hosts` に登録しておく
-- HTTPS：`read_repository` 権限の**プロジェクトアクセストークン**を、実行ユーザーの credential helper に保存する
-
-確認方法：`sudo -u <実行ユーザー> git -C <対象フォルダ> pull --ff-only` がパスワードを聞かれずに成功すればよい。
+pull はパスワード入力なしで通る必要がある（入力待ちで止まらないよう、git に尋ねさせない）。次の手順で、Web 画面の実行ユーザー（godoc-web.service の `User=`）に認証情報を保存しておく。
 複数の `xx_api` を別々にクローンしてまとめた親フォルダを対象にする場合は、「実行前に git pull」をオフにし、別の方法でそれぞれを更新する。
+
+#### GitLab の認証（HTTPS とアクセストークン）
+
+SSH は使えないため、HTTPS で clone し、読み取り専用のトークンで認証する。コマンドは GB10 の端末で、**Web 画面の実行ユーザーとして**実行する（別のユーザーでログインしている場合は、先頭に `sudo -u <実行ユーザー> -H` を付ける）。
+
+1. GitLab の対象プロジェクトで「Settings > Access tokens」を開き、**プロジェクトアクセストークン**を作る
+   - Role：`Reporter`、Scopes：`read_repository` だけ（書き込み権限は付けない）
+   - 有効期限を設定し、期限が来たら作り直す（作り直した後は手順 3 をやり直す）
+   - 対象リポジトリが複数のプロジェクトにある場合は、それぞれで作る（グループアクセストークンなら1つで済む）
+2. 対象フォルダの pull 先が HTTPS の URL になっていることを確かめる
+
+   ```bash
+   git -C /srv/repos/myapp remote -v
+   # git@gitlab.example.com:group/myapp.git のような SSH の URL なら、HTTPS に変える
+   git -C /srv/repos/myapp remote set-url origin https://gitlab.example.com/group/myapp.git
+   ```
+
+   新しく clone する場合も HTTPS の URL を使う（`git clone https://gitlab.example.com/group/myapp.git /srv/repos/myapp`）。
+
+3. トークンを保存する
+
+   ```bash
+   # 認証情報を ~/.git-credentials に保存する設定にする
+   git config --global credential.helper store
+   # 1回だけ手で pull し、Username に oauth2、Password にトークンを入力する（ここで保存される）
+   git -C /srv/repos/myapp pull --ff-only
+   # 保存したファイルを本人だけが読めるようにする
+   chmod 600 ~/.git-credentials
+   ```
+
+4. 確認：パスワードを聞かれずに成功すればよい
+
+   ```bash
+   GIT_TERMINAL_PROMPT=0 git -C /srv/repos/myapp pull --ff-only
+   ```
+
+- トークンは `~/.git-credentials` に平文で保存される。権限を `read_repository` に絞り、有効期限を付けておく（漏れてもソースの読み取り以上のことはできない）
+- clone の URL にトークンを直接書く（`https://oauth2:<トークン>@...`）こともできるが、`.git/config` に残るので勧めない（ログには `***` に伏せて出る）
 
 **systemd の夜間タイマーから移行する場合**は、二重に実行しないよう、systemd のタイマーを止めてから画面で定期実行を有効にする。
 
 ```bash
-ssh -t gb10 "sudo systemctl disable --now godoc-nightly.timer"
+sudo systemctl disable --now godoc-nightly.timer
 systemctl list-timers godoc-nightly.timer   # 表示されなければ止まっている
 ```
 
@@ -231,9 +265,9 @@ systemctl list-timers godoc-nightly.timer   # 表示されなければ止まっ�
 
 ## 5. セキュリティ上の注意
 
-- **通信は HTTP（暗号化なし）**。同じ LAN 上で通信を盗聴できる人には、パスワード・設計書の本文が見える。信頼できない人がいるネットワークでは次のどちらかにする
-  - SSH トンネル：`WEB_HOST=127.0.0.1` のままにし、クライアントで `ssh -N -L 4000:127.0.0.1:4000 gb10` を実行してから `http://localhost:4000` を開く
+- **通信は HTTP（暗号化なし）**。同じ LAN 上で通信を盗聴できる人には、パスワード・設計書の本文が見える。信頼できない人がいるネットワークでは次のどちらかにする（SSH は使えないため、SSH トンネルは使えない）
   - HTTPS のリバースプロキシ（nginx・Caddy など）を前に置き、`WEB_COOKIE_SECURE=true` にする
+  - `WEB_HOST=127.0.0.1` のままにし、GB10 自身のブラウザ（`http://localhost:4000`）からだけ使う
 - 閲覧は既定でログイン不要。設計書の内容を LAN 内の誰にも見せたくない場合は `WEB_VIEW_REQUIRES_LOGIN=true` にする
 - ログインに5回続けて失敗した接続元は、15分間ログインできなくなる
 - フォルダ選択ダイアログは `WEB_BROWSE_ROOTS` の外を表示しない。生成物の表示は出力先の中のファイルだけで、`_runs/` やドットファイル（`.manifest.json` など）は表示しない

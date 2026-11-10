@@ -1,7 +1,7 @@
 # Lang_Chain
 
 Goソースファイルから詳細設計書(Markdown)を一括生成するLangGraphワークフロー（PoC）。
-GB10サーバー上で動かし、クライアントのClaude CodeからSSH経由で起動する。
+GB10サーバー上で動かし、クライアント PC のブラウザ（Web 画面）か、GB10 の端末から起動する（GB10 へは SSH で接続できない前提）。
 
 設計書は、サーバー上の **Claude Code（`claude -p`）がエージェントとして**、既存の **SKILL.md をそのまま使って**書く。
 モデルは Ollama の Anthropic 互換API経由で qwen3-coder-next を使うため、ソースコードはサーバーの外に出ない。
@@ -64,6 +64,8 @@ Web 画面版（PR #23・#24）への入れ替え手順（夜間タイマーか�
 
 ## サーバー(GB10)へのセットアップ
 
+コマンドは GB10 の端末で実行する（SSH は使えないため、GB10 に直接ログインした端末を使う）。
+
 ```bash
 # 1. Ollama の設定（systemd）
 sudo systemctl edit ollama
@@ -86,16 +88,17 @@ python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env  # LLM_MODEL などを編集（LLM_NUM_CTX は 1. の OLLAMA_CONTEXT_LENGTH と同じ値にする）
 
-# 4. 既存のスキルをサーバーに置く（クライアントから実行。参照ファイルがあればフォルダごと）
+# 4. 既存のスキルをサーバーに置く（参照ファイルがあればフォルダごと）
+#    Web 画面を使う場合は、ここでは置かずに、画面の「スキル」タブからクライアント PC のフォルダを選んで登録する（docs/web_ui.md）
+#    Web 画面を使わない場合は、スキルのフォルダを USB メモリや NAS などで GB10 に持ってきてからコピーする
 #    設計書スキルは skills/design-doc-batch/ に置く（フォルダ名を design-doc-batch にする。.env での指定は不要）
-scp -r ~/.claude/skills/design-doc-batch gb10:/opt/Lang_Chain/skills/
-scp -r ~/.claude/skills/<コメント追記スキル名> gb10:/opt/Lang_Chain/skills/   # コメント追記も行う場合
+cp -r <持ってきたフォルダ>/design-doc-batch /opt/Lang_Chain/skills/
+cp -r <持ってきたフォルダ>/<コメント追記スキル名> /opt/Lang_Chain/skills/   # コメント追記も行う場合
 #    コメント追記スキルは、置いた SKILL.md のパスを .env に書く
 #      CLAUDE_COMMENT_SKILL_PATH=/opt/Lang_Chain/skills/<コメント追記スキル名>/SKILL.md
 
 # 5. テスト（Ollama・Claude Code 不要）。最後に「N passed」とだけ表示されれば成功
 cd /opt/Lang_Chain && .venv/bin/python -m pytest
-#    クライアントから実行する場合: ssh gb10 "cd /opt/Lang_Chain && .venv/bin/python -m pytest"
 ```
 
 テストは `/opt/Lang_Chain`（`pytest.ini` のある場所）で、仮想環境の Python から実行する。上の形なら、ターミナルを開き直して `activate` していなくても動く。
@@ -124,19 +127,22 @@ Ollama の接続先（`ANTHROPIC_BASE_URL` など）は runner が `claude` の�
 
 #### 有効にする手順（設計書の生成がすでに動いているサーバーに追加する場合）
 
-すべてクライアントのターミナルから実行する（sudo は不要）。`<コメント追記スキル名>` はクライアントの `~/.claude/skills/` 配下のフォルダ名、`/srv/repos/myapp` は実際の `--repo` のパスに置き換える。
+すべて GB10 の端末で実行する（sudo は不要）。`<コメント追記スキル名>` はスキルのフォルダ名、`/srv/repos/myapp` は実際の `--repo` のパスに置き換える。
+Web 画面を使っている場合は、手順2・3の代わりに画面の「スキル」タブでコメント追記スキルを登録すればよい（`skills/comment-batch/` に置かれ、`.env` の追記は不要）。
 
 **手順1. サーバーのプログラムを最新にする**
 
 ```bash
-ssh gb10 "cd /opt/Lang_Chain && git pull && .venv/bin/pip install -r requirements.txt"
+cd /opt/Lang_Chain && git pull && .venv/bin/pip install -r requirements.txt
 ```
 
-**手順2. スキルをサーバーに送る**（参照ファイルも含めてフォルダごと。設計書スキルと同じ `skills/` 配下に置く）
+**手順2. スキルをサーバーに置く**（参照ファイルも含めてフォルダごと。設計書スキルと同じ `skills/` 配下に置く）
+
+スキルのフォルダを USB メモリや NAS などで GB10 に持ってきてからコピーする。
 
 ```bash
-scp -r ~/.claude/skills/<コメント追記スキル名> gb10:/opt/Lang_Chain/skills/
-ssh gb10 "ls /opt/Lang_Chain/skills/<コメント追記スキル名>/SKILL.md"   # パスが表示されればよい
+cp -r <持ってきたフォルダ>/<コメント追記スキル名> /opt/Lang_Chain/skills/
+ls /opt/Lang_Chain/skills/<コメント追記スキル名>/SKILL.md   # パスが表示されればよい
 ```
 
 **手順3. `.env` にスキルのパスを1行追記する**
@@ -144,27 +150,27 @@ ssh gb10 "ls /opt/Lang_Chain/skills/<コメント追記スキル名>/SKILL.md"  
 既存の `.env` に追記する。`.env.example` をコピーし直すと、設定済みの値（`CLAUDE_BIN` など）が消えるので上書きしないこと。
 
 ```bash
-ssh gb10 "cd /opt/Lang_Chain && grep -q '^CLAUDE_COMMENT_SKILL_PATH=' .env || echo 'CLAUDE_COMMENT_SKILL_PATH=/opt/Lang_Chain/skills/<コメント追記スキル名>/SKILL.md' >> .env"
-ssh gb10 "grep '^CLAUDE_COMMENT_SKILL_PATH=' /opt/Lang_Chain/.env"   # 追記した行が表示されればよい
+cd /opt/Lang_Chain && grep -q '^CLAUDE_COMMENT_SKILL_PATH=' .env || echo 'CLAUDE_COMMENT_SKILL_PATH=/opt/Lang_Chain/skills/<コメント追記スキル名>/SKILL.md' >> .env
+grep '^CLAUDE_COMMENT_SKILL_PATH=' /opt/Lang_Chain/.env   # 追記した行が表示されればよい
 ```
 
 **手順4. 3ファイルだけで試す**（コメント追記だけを実行する）
 
 ```bash
-ssh gb10 "cd /opt/Lang_Chain && .venv/bin/python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --tasks comment --limit 3 --run-id trial-comment"
+cd /opt/Lang_Chain && .venv/bin/python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --tasks comment --limit 3 --run-id trial-comment
 ```
 
 - 最初に `run_id=trial-comment タスク=comment 対象=3 件` と表示され、1ファイル終わるごとに `[1/3] done ... comment user_api/pkg/handler/xxx.go` のような行が出る
-- 1ファイル数分〜十数分かかる。Claude Code から依頼する場合は Bash ツールの時間上限（10分）で打ち切られるため、[2. SSHが切れても止まらないように起動する](#2-sshが切れても止まらないように起動する)の tmux の形で起動する
+- 1ファイル数分〜十数分かかる。途中で端末を閉じる可能性があれば、[2. 端末を閉じても止まらないように起動する](#2-端末を閉じても止まらないように起動する)の tmux の形で起動する
 - 途中で止まったら、同じコマンドをもう一度実行すれば、完了済みのファイルを飛ばして残りを最初から処理する
 
 **手順5. 結果を確認する**
 
 ```bash
 # コメント追記済みのファイルの一覧
-ssh gb10 "cd /opt/Lang_Chain/out/_commented && find . -name '*.go'"
+cd /opt/Lang_Chain/out/_commented && find . -name '*.go'
 # 元のファイルとの差分（追記されたコメントだけが表示される）
-ssh gb10 "diff -ru /srv/repos/myapp/user_api/pkg/handler /opt/Lang_Chain/out/_commented/user_api/pkg/handler"
+diff -ru /srv/repos/myapp/user_api/pkg/handler /opt/Lang_Chain/out/_commented/user_api/pkg/handler
 ```
 
 手順4の表示で `done` 以外になったファイルは、次のように対処する（詳細は `out/_runs/trial-comment.jsonl` の `issues` / `error` 欄）。
@@ -228,21 +234,24 @@ GB10 上で Web 画面を常駐させると、クライアント PC のブラウ
 同時に動く runner は1つだけになるよう、Web 画面・コマンド・夜間タイマーの間でも排他する（runner が出力先ごとにロックを取る）。
 設置・使い方・セキュリティ上の注意は [docs/web_ui.md](docs/web_ui.md) にまとめている。
 
-## クライアント(Claude Code)からの運用
+## 運用（GB10 の端末と Web 画面）
 
-処理はすべてサーバー上で完結する。クライアントの役割は「Goソースの更新」「起動」「成果物の取得」だけ。
+処理はすべてサーバー上で完結する。**GB10 へは SSH で接続できない**ため、操作は次の2つで行う。
+
+- **Web 画面**（クライアント PC のブラウザ）：実行・停止・進捗の確認・生成物のダウンロード・スキルの登録・定期実行の設定。日常の運用はこちらで足りる
+- **GB10 の端末**（GB10 に直接ログインする）：初回の準備、sudo が必要な作業、このリポジトリの更新、コマンドからの実行
 
 ```
-クライアント                         サーバー(GB10)
-  Goソース ──(git push / rsync)──>  /srv/repos/myapp      ← --repo で読む
-  ssh で起動 ───────────────────>  runner（tmux / nohup で切り離して実行）── Claude Code ── Ollama
-  設計書 <──(scp / git pull)──────  /opt/Lang_Chain/out   ← --out に書く
+クライアント PC                                       サーバー(GB10)
+  Goソース ──(git push)──> GitLab ──(git pull / HTTPS)──>  /srv/repos/myapp      ← --repo で読む
+  ブラウザ ──(Web 画面 http://<GB10>:4000)────────────>  runner ── Claude Code ── Ollama
+                                       GB10 の端末からコマンドでも起動できる（tmux / nohup で切り離す）
+  設計書 <──(Web 画面のダウンロード / NAS / git)───────  /opt/Lang_Chain/out   ← --out に書く
 ```
 
 ### 作業の分担：初回だけの準備と、その後の運用
 
-**SSHで接続できれば、すべての作業をクライアントから行える**（サーバーの前で作業する必要はない）。
-ただし、Pythonファイルを置くだけでは動かない。最初に1回だけ、次の準備を SSH 経由で行う。
+Pythonファイルを置くだけでは動かない。最初に1回だけ、次の準備を GB10 の端末で行う。
 
 | 初回だけの準備（詳細は「サーバー(GB10)へのセットアップ」） | sudo |
 |---|---|
@@ -250,29 +259,30 @@ GB10 上で Web 画面を常駐させると、クライアント PC のブラウ
 | Claude Code のインストール | 不要 |
 | このリポジトリの clone、venv 作成、`pip install` | `/opt` 配下なら要 |
 | `.env` の作成（`CLAUDE_BIN` など） | 不要 |
-| SKILL.md（設計書・コメント追記）をクライアントから `scp` で配置 | 不要 |
-| Goリポジトリの clone と、パスワードなしで `git pull` できる設定（SSH鍵など） | 不要 |
-| GB10 のスリープ無効化（「クライアントPCを落としてよいか」参照） | 要 |
-| 定期実行タイマーの設置（使う場合。「定期実行（systemd タイマー）」参照） | 要 |
+| Web 画面の設置（[docs/web_ui.md](docs/web_ui.md)） | 要 |
+| SKILL.md（設計書・コメント追記）の配置（Web 画面の「スキル」タブから登録できる） | 不要 |
+| Goリポジトリの clone（HTTPS）と、パスワードなしで `git pull` できる設定（アクセストークン。[docs/web_ui.md](docs/web_ui.md#gitlab-の認証https-とアクセストークン)） | 不要 |
+| GB10 のスリープ無効化（「端末を閉じてよいか」参照） | 要 |
+| 定期実行の設定（使う場合。Web 画面の「定期実行」か「定期実行（systemd タイマー）」） | タイマーなら要 |
 
-準備が済んだ後の運用は、すべてクライアントからのコマンドで完結する。
+準備が済んだ後の運用は、次のとおり。
 
-| 作業 | クライアントからの操作 |
-|---|---|
-| 設計書の生成 | 手動なら `ssh gb10 "tmux new -d ..."`（「2. SSHが切れても止まらないように起動する」）。定期実行なら毎晩自動 |
-| 進捗・結果の確認 | `ssh gb10 "tail -n 20 /opt/Lang_Chain/out/_runs/<run-id>.log"` / `ssh gb10 systemctl status godoc-nightly.service` |
-| 設計書の取得 | `scp -r gb10:/opt/Lang_Chain/out ./design-docs` |
-| SKILL.md の更新 | `scp` で上書きする（次の実行から反映される） |
-| このリポジトリの更新 | `ssh gb10 "cd /opt/Lang_Chain && git pull && .venv/bin/pip install -r requirements.txt"` |
+| 作業 | Web 画面 | GB10 の端末 |
+|---|---|---|
+| 設計書の生成 | 「実行」タブで実行。定期実行なら毎日自動 | `tmux new -d ...`（「2. 端末を閉じても止まらないように起動する」） |
+| 進捗・結果の確認 | ログ・実行履歴・セッション欄 | `tail -n 20 /opt/Lang_Chain/out/_runs/<run-id>.log` |
+| 設計書の取得 | 生成物の一覧から「ダウンロード」 | NAS へのコピー・git（「3. 設計書を取得する」） |
+| SKILL.md の更新 | 「スキル」タブで登録し直す（次の実行から反映される） | `skills/` 配下を上書きする |
+| このリポジトリの更新 | — | `cd /opt/Lang_Chain && git pull && .venv/bin/pip install -r requirements.txt` の後、`sudo systemctl restart godoc-web` |
 
 注意:
 
-- **sudo が必要な作業は、クライアントの Claude Code には任せられない**。Claude Code のコマンド実行は非対話のため、パスワード入力で失敗する。sudo が必要な作業は、自分のターミナルで `ssh -t gb10 "sudo ..."` のように実行する。それ以外の作業は Claude Code に依頼してよい
-- 停電などでサーバーが停止した後の電源投入は、物理的な操作（またはリモート電源管理）が必要。起動すれば Ollama は自動で立ち上がり、定期実行も逃した分を起動後に実行する
+- **sudo が必要な作業は GB10 の端末で行う**。Web 画面からはできない
+- 停電などでサーバーが停止した後の電源投入は、物理的な操作（またはリモート電源管理）が必要。起動すれば Ollama と Web 画面は自動で立ち上がり、定期実行も逃した分を起動後に実行する
 
 ### 1. Goリポジトリをサーバーに置く
 
-`--repo` はサーバー上のパスとして直接読み込まれる。クライアントからソースを送る機能はない。
+`--repo` はサーバー上のパスとして直接読み込まれる。クライアントからソースを送る機能はない（Web 画面もサーバー上のフォルダを選ぶだけ）。
 
 置き場所は任意で、このREADMEの `/srv/repos/myapp` は例にすぎない。置いたパスを `--repo` に指定すればよい。
 
@@ -282,57 +292,58 @@ GB10 上で Web 画面を常駐させると、クライアント PC のブラウ
 
 置き方:
 
-- **git（推奨）**：サーバーで `git clone` し、実行前に `git pull` する。どのコミットから生成したかが明確になる
-- **転送**：未コミットの変更も対象にしたい場合は `rsync` / `scp -r` でサーバーへコピーする
+- **git（推奨）**：サーバーで `git clone`（HTTPS）し、実行前に `git pull` する。どのコミットから生成したかが明確になる
+- **NAS**：NAS 上のフォルダを GB10 にマウントして対象にする（[docs/nas_target.md](docs/nas_target.md)）
+- **持ち込み**：未コミットの変更も対象にしたい場合は、USB メモリなどで GB10 に持ってきてコピーする（SSH を使う `rsync` / `scp` は使えない）
 
-### 2. SSHが切れても止まらないように起動する
+### 2. 端末を閉じても止まらないように起動する
 
-`ssh gb10 "python -m godoc_agent.runner ..."` のように直接起動すると、プロセスがSSHセッションにぶら下がる。
-次の場合はサーバー側の処理も止まるため、**全件実行では必ず tmux か nohup で切り離す**。
+Web 画面から実行する場合は、この節は不要（runner は Web 画面のサービスの下で動き、ブラウザを閉じても止まらない）。
 
-- クライアントPCのシャットダウン・スリープ、ネットワーク切断でSSHが切れる
-- Claude Code の Bash ツールの時間上限（最大10分）で打ち切られる
+GB10 の端末で `python -m godoc_agent.runner ...` のように直接起動すると、プロセスがその端末にぶら下がる。
+端末を閉じたり GB10 からログアウトしたりすると処理も止まるため、**全件実行では必ず tmux か nohup で切り離す**。
 
 ```bash
 # A. tmux（後から接続して進捗を見られる。推奨）
-ssh gb10 "tmux new -d -s godoc 'cd /opt/Lang_Chain && mkdir -p out/_runs && .venv/bin/python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --run-id nightly-20261102 2>&1 | tee out/_runs/nightly-20261102.log'"
+tmux new -d -s godoc 'cd /opt/Lang_Chain && mkdir -p out/_runs && .venv/bin/python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --run-id nightly-20261102 2>&1 | tee out/_runs/nightly-20261102.log'
 
 # B. nohup（tmuxがない場合）
-ssh gb10 "cd /opt/Lang_Chain && mkdir -p out/_runs && nohup .venv/bin/python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --run-id nightly-20261102 > out/_runs/nightly-20261102.log 2>&1 < /dev/null &"
+cd /opt/Lang_Chain && mkdir -p out/_runs && nohup .venv/bin/python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --run-id nightly-20261102 > out/_runs/nightly-20261102.log 2>&1 < /dev/null &
 ```
 
 - `--run-id` は計測ログ・標準出力ログのファイル名になる。同じ値で再実行すると同じログに追記されるので、明示しておくと追いやすい
 - 万一止まっても、同じコマンドで再実行すれば完了済みのファイルを飛ばし、残りを最初から処理する
-- `--limit 5` 程度のPoC実行なら、10分以内に終わる見込みがあれば直接起動でもよい（この場合はPCを落とすと止まる）
+- `--limit 5` 程度のPoC実行で、終わるまで端末を開いておけるなら直接起動でもよい（この場合は端末を閉じると止まる）
 
 進捗の確認:
 
 ```bash
-ssh gb10 "tail -n 20 /opt/Lang_Chain/out/_runs/nightly-20261102.log"   # ログの末尾
-ssh -t gb10 tmux attach -t godoc                                        # tmuxの場合（Ctrl-b d で離脱）
+tail -n 20 /opt/Lang_Chain/out/_runs/nightly-20261102.log   # ログの末尾
+tmux attach -t godoc                                        # tmuxの場合（Ctrl-b d で離脱）
 ```
 
-### クライアントPCを落としてよいか
+### 端末を閉じてよいか
 
-tmux / nohup で起動していれば、**起動後はクライアントPCを落としてよい**。落とす前に次の2点を確認する。
+tmux / nohup で起動していれば、**起動後は端末を閉じて GB10 からログアウトしてよい**。Web 画面から実行した場合は、ブラウザを閉じてもクライアント PC を落としてもよい。
+端末を閉じる前に次の2点を確認する。
 
 1. 起動コマンドが戻ってきている（tmux / nohup はバックグラウンドに切り離して即座に戻る）
 2. サーバーで処理が始まっている
 
    ```bash
-   ssh gb10 "tail -n 5 /opt/Lang_Chain/out/_runs/nightly-20261102.log"
+   tail -n 5 /opt/Lang_Chain/out/_runs/nightly-20261102.log
    ```
 
    `run_id=... 対象=N 件` の後に `[1/N] done ...` のような進捗行が出ていればよい。すぐに `エラー:` が出ている場合は、Ollama・Claude Code・`.env` の設定を見直す
 
-クライアントPCを落としても、サーバー側の要因では処理が止まる。
+端末を閉じても、サーバー側の要因では処理が止まる。
 
 | 要因 | 対策 |
 |---|---|
 | GB10 のスリープ・自動サスペンド（Ubuntuデスクトップ版では既定で有効な場合がある） | `sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target` で無効にする |
 | サーバーの再起動、Ollama の停止 | 同じコマンドで再実行すれば、完了済みを飛ばして残りを処理する |
 
-PCを再起動した後は、ログの末尾にサマリー（`対象: ... 件 / 経過時間: ...`）が出ていれば完了している。
+後で確認するときは、ログの末尾にサマリー（`対象: ... 件 / 経過時間: ...`）が出ていれば完了している。
 失敗した件があった場合や途中で止まっていた場合は、同じコマンドで再実行すると残りだけが（最初から）処理される。完了したら次の手順で設計書を取得する。
 
 ### 3. 設計書を取得する
@@ -362,14 +373,11 @@ PCを再起動した後は、ログの末尾にサマリー（`対象: ... 件 /
 >
 > `xx_api` の親ディレクトリを `--repo` に指定する（推奨）か、API ごとに `--out ./out/user_api` のように出力先を分けること。
 
-クライアントへの取得方法:
+クライアントへの取得方法（SSH を使う `scp` は使えない）:
 
-```powershell
-# scp でクライアントへコピー
-scp -r gb10:/opt/Lang_Chain/out ./design-docs
-```
-
-または `--out /srv/repos/myapp/docs/design` のようにGoリポジトリ内へ出力し、サーバーでコミット・pushすれば、クライアントは `git pull` で受け取れる。
+- **Web 画面**：生成物の一覧からファイルを選び、「ダウンロード」で保存する（1ファイルずつ）
+- **NAS**：GB10 に NAS をマウントしていれば、出力先を NAS へコピーし、クライアント PC からは NAS の共有フォルダで受け取る（[docs/nas_target.md の「生成物を NAS にも置きたい場合」](docs/nas_target.md#8-生成物を-nas-にも置きたい場合)）
+- **git**：`--out /srv/repos/myapp/docs/design` のようにGoリポジトリ内へ出力し、サーバーでコミット・push すれば、クライアントは `git pull` で受け取れる（push には書き込み権限のあるトークンが必要。読み取り専用のトークンとは分ける）
 
 ## 定期実行（systemd タイマー）
 
@@ -393,7 +401,8 @@ cd /opt/Lang_Chain
 # 1. .env の CLAUDE_BIN を claude のフルパスにする（systemd の PATH には ~/.local/bin が入らない）
 which claude          # 例: /home/<ユーザー>/.local/bin/claude → CLAUDE_BIN=/home/<ユーザー>/.local/bin/claude
 
-# 2. 実行ユーザーで、Goリポジトリの git pull がパスワード入力なしでできることを確認する（SSH鍵・デプロイキーなど）
+# 2. 実行ユーザーで、Goリポジトリの git pull がパスワード入力なしでできることを確認する
+#    （HTTPS とアクセストークン。設定方法は docs/web_ui.md の「GitLab の認証（HTTPS とアクセストークン）」）
 git -C /srv/repos/myapp pull --ff-only
 
 # 3. 手動でスクリプトを試す
