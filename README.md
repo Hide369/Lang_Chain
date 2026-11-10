@@ -61,6 +61,7 @@ generate の中身（ファイルごと）:
 以前の版（Go 専用）からサーバーを入れ替える手順は [docs/migration_multi_language.md](docs/migration_multi_language.md) にまとめている。
 チェックポイント廃止・再生成の見直し版（PR #21）への入れ替え手順は [docs/migration_drop_checkpointer.md](docs/migration_drop_checkpointer.md) にまとめている。
 Web 画面版（PR #23・#24）への入れ替え手順（夜間タイマーからの切り替え・GitLab の認証を含む）は [docs/migration_web_ui.md](docs/migration_web_ui.md) にまとめている。
+Ollama を止めて vLLM に切り替える手順（アカウント登録の要否・メモリ枯渇対策・Ollama に戻す手順を含む）は [docs/vllm_migration.md](docs/vllm_migration.md) にまとめている。
 
 ## サーバー(GB10)へのセットアップ
 
