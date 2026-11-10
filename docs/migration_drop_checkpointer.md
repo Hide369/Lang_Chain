@@ -1,7 +1,7 @@
 # チェックポイント廃止・再生成の見直し版への移行手順（サーバー）
 
 コンテキスト超過エラーへの対策を入れた版（PR #21）に、サーバー（GB10）を入れ替える手順をまとめる。
-コマンドはすべてクライアントのターミナルから実行する。sudo は不要。
+コマンドはすべて GB10 の端末で実行する（SSH は使えないため、GB10 に直接ログインした端末を使う）。sudo は不要。
 
 ## 0. この版で変わること
 
@@ -21,7 +21,7 @@
 入れ替え中にバッチが動いていると、途中で別の版のプログラムに変わってしまう。止まっていることを確認する。
 
 ```bash
-ssh gb10 "systemctl is-active godoc-nightly.service; tmux ls 2>/dev/null; pgrep -af godoc_agent.runner"
+systemctl is-active godoc-nightly.service; tmux ls 2>/dev/null; pgrep -af godoc_agent.runner
 ```
 
 `inactive` と表示され、`tmux ls` と `pgrep` が何も表示しなければよい。
@@ -33,7 +33,7 @@ ssh gb10 "systemctl is-active godoc-nightly.service; tmux ls 2>/dev/null; pgrep 
 書き換えたままだと `git pull` が失敗するため、差分を確認する。
 
 ```bash
-ssh gb10 "cd /opt/Lang_Chain && git status --short"
+cd /opt/Lang_Chain && git status --short
 ```
 
 | 表示 | 対応 |
@@ -45,17 +45,17 @@ ssh gb10 "cd /opt/Lang_Chain && git status --short"
 
 ```bash
 # 書き換えた内容を確認する
-ssh gb10 "cd /opt/Lang_Chain && git diff godoc_agent/runner.py"
+cd /opt/Lang_Chain && git diff godoc_agent/runner.py
 # 退避する（消さずに残すので、あとから git stash show -p で見返せる）
-ssh gb10 "cd /opt/Lang_Chain && git stash push -m 'tmp: in-memory checkpointer' godoc_agent/runner.py"
+cd /opt/Lang_Chain && git stash push -m 'tmp: in-memory checkpointer' godoc_agent/runner.py
 # 確認（runner.py が表示されなければよい）
-ssh gb10 "cd /opt/Lang_Chain && git status --short"
+cd /opt/Lang_Chain && git status --short
 ```
 
 ## 2. プログラムを更新する（`git pull`）
 
 ```bash
-ssh gb10 "cd /opt/Lang_Chain && git pull"
+cd /opt/Lang_Chain && git pull
 ```
 
 次の16ファイルが自動で入れ替わる。手作業は不要。
@@ -72,7 +72,7 @@ ssh gb10 "cd /opt/Lang_Chain && git pull"
 使わなくなったパッケージを消したい場合だけ、次を実行する（残っていても動作に影響はない）。
 
 ```bash
-ssh gb10 "/opt/Lang_Chain/.venv/bin/pip uninstall -y langgraph-checkpoint-sqlite"
+/opt/Lang_Chain/.venv/bin/pip uninstall -y langgraph-checkpoint-sqlite
 ```
 
 ## 3. サーバー上で片付けるもの（Git の管理外）
@@ -84,11 +84,11 @@ ssh gb10 "/opt/Lang_Chain/.venv/bin/pip uninstall -y langgraph-checkpoint-sqlite
 
 ```bash
 # 1. チェックポイントを削除する（ls で中身を確認してから消す）
-ssh gb10 "cd /opt/Lang_Chain && ls -la state/ && rm -f state/checkpoints.sqlite*"
+cd /opt/Lang_Chain && ls -la state/ && rm -f state/checkpoints.sqlite*
 # 2. .env から CHECKPOINT_DB の行を削除する
-ssh gb10 "cd /opt/Lang_Chain && sed -i '/^CHECKPOINT_DB=/d' .env"
+cd /opt/Lang_Chain && sed -i '/^CHECKPOINT_DB=/d' .env
 # 3. 確認（0 と表示されればよい）
-ssh gb10 "grep -c '^CHECKPOINT_DB=' /opt/Lang_Chain/.env"
+grep -c '^CHECKPOINT_DB=' /opt/Lang_Chain/.env
 ```
 
 `checkpoints.sqlite*` としているのは、SQLite が作る `-wal`・`-shm` ファイルも一緒に消すため。
@@ -107,14 +107,14 @@ ssh gb10 "grep -c '^CHECKPOINT_DB=' /opt/Lang_Chain/.env"
 
 ```bash
 # テスト（Ollama・Claude Code 不要）。「102 passed」と表示されればよい
-ssh gb10 "cd /opt/Lang_Chain && .venv/bin/python -m pytest"
+cd /opt/Lang_Chain && .venv/bin/python -m pytest
 ```
 
 次に、件数を絞って1回実行する（`/srv/repos/myapp` は実際の `--repo` のパスに置き換える）。
 以前コンテキスト超過で失敗したファイルが分かっていれば、それが対象に入るようにすると効果を確かめやすい。
 
 ```bash
-ssh gb10 "cd /opt/Lang_Chain && .venv/bin/python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --limit 3 --run-id check-pr21"
+cd /opt/Lang_Chain && .venv/bin/python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --limit 3 --run-id check-pr21
 ```
 
 ### 5-1. 再生成で入力が伸びていないことを確認する
@@ -123,7 +123,7 @@ ssh gb10 "cd /opt/Lang_Chain && .venv/bin/python -m godoc_agent.runner --repo /s
 次のコマンドで、ファイルごとに試行ごとの値を表示する。
 
 ```bash
-ssh gb10 '/opt/Lang_Chain/.venv/bin/python - /opt/Lang_Chain/out/_runs/check-pr21.jsonl' <<'EOF'
+/opt/Lang_Chain/.venv/bin/python - /opt/Lang_Chain/out/_runs/check-pr21.jsonl <<'EOF'
 import json, sys
 for line in open(sys.argv[1], encoding="utf-8"):
     log = json.loads(line)
@@ -146,11 +146,11 @@ EOF
 
 ```bash
 # PR #21 より前の版に戻す（戻した後は main に戻すまで git pull しない）
-ssh gb10 "cd /opt/Lang_Chain && git checkout 1a57d8d"
+cd /opt/Lang_Chain && git checkout 1a57d8d
 # 削除していた依存を入れ直す
-ssh gb10 "cd /opt/Lang_Chain && .venv/bin/pip install -r requirements.txt"
+cd /opt/Lang_Chain && .venv/bin/pip install -r requirements.txt
 # 1-2. で退避した暫定対応（インメモリ化）も戻す場合
-ssh gb10 "cd /opt/Lang_Chain && git stash list && git stash pop"
+cd /opt/Lang_Chain && git stash list && git stash pop
 ```
 
 元に戻した版では、チェックポイント（`state/checkpoints.sqlite`）は初回の実行で新しく作られる。
