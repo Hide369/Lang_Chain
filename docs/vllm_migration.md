@@ -18,6 +18,7 @@ GB10 上で vLLM を起動するときは、確保メモリ量を明示的に絞
 4. 手順1.5: vLLM を導入する（初回のみ）
 5. 手順2〜4: キャッシュを解放し、vLLM を起動して動作を確認する
 6. 失敗したら「[Ollama に戻す手順](#ollama-に戻す手順いつでも実行可)」で元に戻す（どの段階からでも実行できる）
+7. vLLM をもう使わないなら「[vLLM を削除する手順](#vllm-を削除する手順やめる場合)」で片付ける
 
 ## アカウント登録の要否
 
@@ -247,7 +248,51 @@ sudo systemctl start godoc-nightly.timer
 - [ ] Web 画面から1ファイルだけ設計書を生成し、成功する
 
 - vLLM の systemd サービスを作っていた場合は必ず `disable` する。有効のままだと、再起動時に `Conflicts=ollama.service` により Ollama が止まることがある
-- vLLM を完全にやめる場合だけ、`docker rmi nvcr.io/nvidia/vllm:<タグ>` と `~/.cache/huggingface/hub/models--openai--gpt-oss-120b` を削除して容量を空ける。残しておけば、再挑戦するときに再ダウンロードが要らない
+- vLLM を完全にやめる場合は、続けて「[vLLM を削除する手順](#vllm-を削除する手順やめる場合)」を行う
+
+## vLLM を削除する手順（やめる場合）
+
+「Ollama に戻す手順」を終えてから行う。vLLM をもう使わない場合だけ実行する。再挑戦するなら、イメージとモデルを残しておけば再ダウンロード（合計で数十GB）が要らない。
+
+```bash
+# 1. vLLM のプロセス・コンテナが残っていないか
+pgrep -af "vllm serve"                  # 何も表示されなければよい
+docker ps -a --filter name=vllm         # 見出し行だけならよい
+
+# 2. コンテナが残っていれば削除
+docker rm -f vllm
+
+# 3. コンテナイメージを削除（タグは一覧で確認する）
+docker images nvcr.io/nvidia/vllm
+docker rmi nvcr.io/nvidia/vllm:<タグ>
+
+# 4. モデル（約60GB）を削除。コンテナが root で書き込んだファイルなので sudo が要る
+sudo rm -rf ~/.cache/huggingface/hub/models--openai--gpt-oss-120b
+
+# 5. 運用メモの systemd 化をしていた場合だけ、サービスを削除
+sudo systemctl disable --now vllm
+sudo rm /etc/systemd/system/vllm.service
+sudo systemctl daemon-reload
+sudo systemctl reset-failed
+
+# 6. コンテナを使わず pip（venv）で入れていた場合だけ、その venv を削除
+rm -rf /path/to/venv
+
+# 7. ログを削除
+rm -f ~/vllm.log
+```
+
+- [ ] `docker images nvcr.io/nvidia/vllm` に何も表示されない
+- [ ] `systemctl status vllm` が `Unit vllm.service could not be found.` になる
+- [ ] `df -h ~` で空き容量が増えている
+- [ ] `systemctl is-active ollama` が `active` のまま
+
+次のものは削除しない。
+
+- Ollama のモデル（`/usr/share/ollama/.ollama/models`）と設定（`sudo systemctl edit ollama` で入れたもの）
+- Docker と NVIDIA Container Toolkit（DGX OS に同梱で、ほかの用途でも使う）
+- `~/.cache/huggingface` フォルダ自体（ほかのモデルが入っている場合がある。消すのは gpt-oss-120b のフォルダだけ）
+- `~/ollama-backup`（Ollama が元どおり動くことを数日確認してから消してよい）
 
 ## 運用メモ
 
