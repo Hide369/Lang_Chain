@@ -18,9 +18,10 @@ GB10 上で vLLM を起動するときは、確保メモリ量を明示的に絞
 3. 手順1: Ollama を止める（アンインストールはしない）
 4. 手順1.5: vLLM を導入する（初回のみ）
 5. 手順2〜4: キャッシュを解放し、vLLM を起動して動作を確認する
-6. Qwen3-Coder-Next が動かなければ「[gpt-oss-120b に切り替える手順](#gpt-oss-120b-に切り替える手順qwen3-coder-next-が失敗したとき)」で vLLM のままモデルを替える
-7. それでも失敗したら「[Ollama に戻す手順](#ollama-に戻す手順いつでも実行可)」で元に戻す（どの段階からでも実行できる）
-8. vLLM をもう使わないなら「[vLLM を削除する手順](#vllm-を削除する手順やめる場合)」で片付ける
+6. 手順5: アプリ（Claude Code ヘッドレス）の接続先とモデル名を vLLM に合わせる
+7. Qwen3-Coder-Next が動かなければ「[gpt-oss-120b に切り替える手順](#gpt-oss-120b-に切り替える手順qwen3-coder-next-が失敗したとき)」で vLLM のままモデルを替える
+8. それでも失敗したら「[Ollama に戻す手順](#ollama-に戻す手順いつでも実行可)」で元に戻す（どの段階からでも実行できる）
+9. vLLM をもう使わないなら「[vLLM を削除する手順](#vllm-を削除する手順やめる場合)」で片付ける
 
 ## アカウント登録の要否
 
@@ -217,6 +218,85 @@ watch -n 2 free -h
 - [ ] 応答が返る
 - [ ] 推論中も `available` が 10GB 以上残っている（OS の余裕）
 - [ ] ログに `KV cache` の確保量と最大同時処理数が出ている（`grep -i "kv cache" ~/vllm.log`）。262144 トークンが収まっていること
+
+## 手順5: アプリ（Claude Code ヘッドレス）から使う
+
+アプリはバッチ処理で `claude -p --model <LLM_MODEL>` を起動する。ヘッドレスモードの Claude Code は Claude のモデル名しか受け付けないため、Ollama では Modelfile で既存モデルを Claude 名で包んでいた。vLLM には Modelfile がないので、代わりに `--served-model-name` で Claude 名の別名を付ける。
+
+`--served-model-name` には名前を複数書ける。どの名前で呼んでも同じモデルが応答する。重みは1つだけ読み込まれるので、メモリは増えない。
+
+### 案1: `--served-model-name` に Claude 名の別名を足す（推奨）
+
+Modelfile の直接の代わりになる。手順1.5・3 の起動コマンドの `--served-model-name` を次のようにする。`claude-sonnet-4-5` の部分は、Ollama の Modelfile で付けていた名前と同じにする。
+
+```bash
+docker run -d --name vllm --gpus all --network host --ipc=host \
+  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  nvcr.io/nvidia/vllm:<タグ> \
+  vllm serve Qwen/Qwen3-Coder-Next-FP8 \
+    --served-model-name claude-sonnet-4-5 qwen3-coder-next \
+    --host 0.0.0.0 --port 8000 \
+    --gpu-memory-utilization 0.8 \
+    --max-model-len 262144 \
+    --max-num-seqs 2 \
+    --kv-cache-dtype fp8 \
+    --enable-auto-tool-choice --tool-call-parser qwen3_coder
+```
+
+アプリの `.env` を vLLM に向ける。`OLLAMA_BASE_URL` は変数名が Ollama のままだが、`claude` 起動時の `ANTHROPIC_BASE_URL` に使われるので vLLM のポートに変える。末尾に `/v1` は付けない（Claude Code が `/v1/messages` を付ける）。
+
+```bash
+# /opt/Lang_Chain/.env
+OLLAMA_BASE_URL=http://127.0.0.1:8000
+LLM_MODEL=claude-sonnet-4-5
+```
+
+- アプリは `ANTHROPIC_DEFAULT_OPUS_MODEL`・`SONNET`・`HAIKU` をすべて `LLM_MODEL` にするので、別名は1つあれば足りる。補助処理（haiku 系）も同じ名前で vLLM に届く
+- `ANTHROPIC_AUTH_TOKEN=ollama` はそのままでよい。vLLM を `--api-key` なしで起動していれば値は見られない
+- `/v1/models` の一覧と応答の `model` 欄には先頭の名前（`claude-sonnet-4-5`）が出る
+- gpt-oss-120b で動かす場合も同じ。`--served-model-name claude-sonnet-4-5 gpt-oss-120b` とし、`.env` の `LLM_NUM_CTX=131072` は「gpt-oss-120b に切り替える手順」のとおりにする
+- 運用メモの systemd 化をする場合は、`ExecStart` の `--served-model-name` も同じにする
+
+起動後、Claude Code が使う Anthropic 互換の `/v1/messages` に Claude 名で応答が返るかを確かめる。
+
+```bash
+# 1. 別名が一覧に出るか
+curl http://localhost:8000/v1/models
+
+# 2. Anthropic 互換エンドポイントに Claude 名で届くか
+curl http://localhost:8000/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{"model":"claude-sonnet-4-5","max_tokens":64,"messages":[{"role":"user","content":"こんにちは"}]}'
+
+# 3. Claude Code のヘッドレスモードで届くか
+ANTHROPIC_BASE_URL=http://127.0.0.1:8000 ANTHROPIC_AUTH_TOKEN=local ANTHROPIC_API_KEY= \
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+  claude -p "こんにちは。1行で返答してください。" --model claude-sonnet-4-5
+```
+
+- [ ] `/v1/models` に `claude-sonnet-4-5` が出る
+- [ ] `/v1/messages` が応答する（`404` なら vLLM が古く Anthropic 互換エンドポイントがない。新しいタグのコンテナにする）
+- [ ] `claude -p` が応答する
+
+### 案2: LiteLLM Proxy で名前を付け替える
+
+vLLM は元の名前のまま起動し、前に置いた LiteLLM Proxy で Claude 名を vLLM のモデルに対応させる。docs/proxy の構成に組み込める。モデルや GB10 を複数台にしたとき、バッチ用と対話用で使うモデルを分けたいときに向く。
+
+```yaml
+# LiteLLM の config.yaml（抜粋）
+model_list:
+  - model_name: claude-sonnet-4-5
+    litellm_params:
+      model: hosted_vllm/qwen3-coder-next
+      api_base: http://gb10:8000/v1
+```
+
+- `.env` の `OLLAMA_BASE_URL` は Proxy の URL に、`LLM_MODEL` は `model_name` の値にする
+- 経由する段が1つ増えるので、まず案1で動くことを確かめてから移すとよい
+
+### 案3: Claude Code のモデル別名だけで済ませる（要検証）
+
+`--model sonnet` と別名で指定し、`ANTHROPIC_DEFAULT_SONNET_MODEL` などに vLLM 側の名前（`qwen3-coder-next`）を入れる方法。vLLM 側は変えずに済む。ただし、アプリは `--model` と `ANTHROPIC_DEFAULT_*_MODEL` に同じ `LLM_MODEL` を渡すため、アプリの修正が要る。ヘッドレスモードのモデル名の確認をこれで通れるかも、使う Claude Code のバージョンで試してから採用する。
 
 ## トラブルシューティング
 
