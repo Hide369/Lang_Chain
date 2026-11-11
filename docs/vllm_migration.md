@@ -129,7 +129,32 @@ docker run --rm --gpus all nvcr.io/nvidia/vllm:<タグ> nvidia-smi
 mkdir -p ~/.cache/huggingface
 ```
 
-手順3の `vllm serve` は、次のようにコンテナ内で実行する。モデル（約85GB）は初回起動時に自動でダウンロードされる。
+### モデルを先にダウンロードする（進捗を見るため）
+
+モデル（約85GB）は `vllm serve` の初回起動時にも自動でダウンロードされるが、`-d` で起動するとダウンロードの進捗が見えず、止まったのか進んでいるのか区別できない。先にダウンロードだけを単独で実行しておくと、進捗バーが表示される。
+
+```bash
+# 同じイメージを使うので、ホスト側への追加インストールは不要
+# -it を付けると、ファイルごとの進捗バーが表示される。途中で止まっても再実行すれば続きから再開する
+docker run --rm -it \
+  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  nvcr.io/nvidia/vllm:<タグ> \
+  hf download Qwen/Qwen3-Coder-Next-FP8
+# hf コマンドがないと出た場合は huggingface-cli download に置き換える
+```
+
+- `You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN...` という警告が出ても、ダウンロードは続く。公開モデルなのでトークンは必須ではない（速度制限が厳しくなるだけ）。警告を消したい場合は、Hugging Face で Read 権限のトークンを作り、`-e HF_TOKEN=<トークン>` を付ける
+- ダウンロード済みのモデルは `~/.cache/huggingface` に残り、次の `vllm serve` はそれを使う
+
+すでに `vllm serve` のコンテナでダウンロードが始まっている場合は、別の端末で容量の増え方を見る。約85GBに近づけば終わりかけている。
+
+```bash
+watch -n 10 'du -sh ~/.cache/huggingface/hub/models--Qwen--Qwen3-Coder-Next-FP8'
+```
+
+### コンテナで vLLM を起動する
+
+手順3の `vllm serve` は、次のようにコンテナ内で実行する。`-d` を付けているので、コマンドはコンテナIDを1行表示してすぐ終わる。以降の処理はバックグラウンドで進むため、止まったわけではない。状況は `docker logs -f vllm` で見る。
 
 ```bash
 docker run -d --name vllm --gpus all --network host --ipc=host \
@@ -199,6 +224,19 @@ vllm serve Qwen/Qwen3-Coder-Next-FP8 \
 4. `--max-model-len` を 65536 に下げる
 
 ## 手順4: 起動確認と動作テスト
+
+vLLM は、モデルの読み込みとウォームアップがすべて終わってから API を受け付ける。それまでは `curl` が `Connection refused` になるが、これは正常な挙動。`docker logs -f vllm` で、次の順に進むのを待つ。
+
+1. `Loading safetensors checkpoint shards: xx%`（モデルの読み込み）
+2. `torch.compile` / `Capturing CUDA graphs`（ウォームアップ。数分止まって見えることがある）
+3. `Application startup complete` / `Uvicorn running on http://0.0.0.0:8000`（起動完了。ここから `curl` が通る）
+
+途中で止まって見えるときは、次で進んでいるかを確かめる。
+
+```bash
+docker ps -a        # STATUS が Up なら動作中、Exited なら落ちている（docker logs の末尾にエラーが出る）
+free -h             # used が増えていれば読み込み中
+```
 
 ログに起動完了が出たら、API を叩いて応答とメモリ残量を確認する。
 
@@ -302,6 +340,11 @@ model_list:
 
 | 症状 | 考えられる原因 | 対処 |
 | --- | --- | --- |
+| `docker run -d` の後、何も表示されず止まったように見える | `-d` でバックグラウンド起動しているため。初回はモデル（約85GB）のダウンロード中で、進捗も出ない | `docker logs -f vllm` で確認する。進捗を見たい場合は、手順1.5の「モデルを先にダウンロードする」で先にダウンロードする |
+| `curl http://localhost:8000/v1/models` が `Connection refused` | まだ読み込み・ウォームアップ中か、コンテナが落ちている | `docker ps -a` で Up か確認。Up なら `Application startup complete` が出るまで待つ。Exited なら `docker logs vllm` の末尾のエラーを見る |
+| `/v1/models` が `401 Unauthorized` | 起動時に `--api-key` を付けている | `-H "Authorization: Bearer <キー>"` を付けて呼ぶ |
+| `Please set a HF_TOKEN` の警告が出る | Hugging Face に未認証でアクセスしている | 警告だけで処理は続く。消したい場合は `-e HF_TOKEN=<トークン>` を付ける |
+| 読み込みが進まない・途中で落ちる | Ollama がモデルを保持したままで、メモリが足りない | 手順1で Ollama を止め、`free -h` で `available` を確認してから `docker rm -f vllm` で作り直す |
 | 起動時に `CUDA out of memory` | 予約割合が空きより大きい | 手順1・2を実施する。それでも出る場合は `--gpu-memory-utilization` を 0.75 まで下げ、`--max-model-len` も下げる |
 | `No available memory for the cache blocks` | 重みを載せた後に KV キャッシュの余地がない | `--max-model-len` を下げる、`fp8` KV キャッシュを使う。`--gpu-memory-utilization` は 0.85 までにとどめる |
 | `max_model_len` が KV キャッシュに収まらないと出る | コンテキスト長が大きすぎる | `--max-model-len` をエラーが示す値以下にし、`.env` の `LLM_NUM_CTX` も揃える |
