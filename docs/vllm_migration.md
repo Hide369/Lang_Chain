@@ -252,6 +252,25 @@ docker top vllm | grep -E "nvcc|ninja|cicc"
 - nvcc などが動いている → GB10 向けに初回だけカーネルをコンパイルしている。数十分かかることがあるが、2回目以降は速い
 - どちらも変化がない → 止まっている。`docker rm -f vllm` で止め、手順1.5の「モデルを先にダウンロードする」で先にダウンロードする
 
+ダウンロード中でも、容量の増え方が極端に遅い場合がある（例: 1時間半で11GB。このままでは85GBまで数時間以上かかる）。数分おいて `du -sh` を再実行し、増えていれば「遅いだけ」、同じ値のままなら「止まっている」。どちらの場合も、次のように進捗が見える形に切り替える。ダウンロード済みの分はそのまま使われ、続きから再開する。
+
+```bash
+# 1. 今のコンテナを止める
+docker rm -f vllm
+
+# 2. 進捗バー付きでダウンロード（トークンを付けると速度制限がゆるくなる）
+docker run --rm -it \
+  -e HF_TOKEN=hf_xxxxxxxx \
+  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  nvcr.io/nvidia/vllm:<タグ> \
+  hf download Qwen/Qwen3-Coder-Next-FP8
+```
+
+- 起動時の `Please set a HF_TOKEN` の警告は、未認証だと速度が制限されるという意味。ダウンロードが遅い主な原因になりうる
+- トークンは https://huggingface.co/settings/tokens で、Read 権限のものを無料で作れる
+- 進捗バーに出る速度（MB/s）が、トークンを付けても遅い場合は、回線やプロキシ側の問題を疑う
+- ダウンロードが終わったら、手順1.5の `docker run -d ...` で vLLM を起動し直す
+
 ログに起動完了が出たら、API を叩いて応答とメモリ残量を確認する。
 
 ```bash
@@ -359,6 +378,7 @@ model_list:
 | `curl http://localhost:8000/v1/models` が `Connection refused` | まだ読み込み・ウォームアップ中か、コンテナが落ちている | `docker ps -a` で Up か確認。Up なら `Application startup complete` が出るまで待つ。Exited なら `docker logs vllm` の末尾のエラーを見る |
 | `/v1/models` が `401 Unauthorized` | 起動時に `--api-key` を付けている | `-H "Authorization: Bearer <キー>"` を付けて呼ぶ |
 | `Please set a HF_TOKEN` の警告が出る | Hugging Face に未認証でアクセスしている | 警告だけで処理は続く。消したい場合は `-e HF_TOKEN=<トークン>` を付ける |
+| モデルのダウンロードが極端に遅い・途中で止まる | 未認証のため速度が制限されている、または回線の問題 | `docker rm -f vllm` で止め、`-e HF_TOKEN=<トークン>` を付けて `hf download` で進捗を見ながらダウンロードし直す（手順4参照）。続きから再開する |
 | 読み込みが進まない・途中で落ちる | Ollama がモデルを保持したままで、メモリが足りない | 手順1で Ollama を止め、`free -h` で `available` を確認してから `docker rm -f vllm` で作り直す |
 | 起動時に `CUDA out of memory` | 予約割合が空きより大きい | 手順1・2を実施する。それでも出る場合は `--gpu-memory-utilization` を 0.75 まで下げ、`--max-model-len` も下げる |
 | `No available memory for the cache blocks` | 重みを載せた後に KV キャッシュの余地がない | `--max-model-len` を下げる、`fp8` KV キャッシュを使う。`--gpu-memory-utilization` は 0.85 までにとどめる |
