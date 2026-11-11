@@ -462,6 +462,7 @@ vLLM の導入や起動に失敗したとき、または試用をやめるとき
 
 ```bash
 # 1. vLLM を止める（起動方法に合う行だけでよい。該当しない行のエラーは無視できる）
+docker update --restart no vllm      # 再起動ポリシーを付けていた場合（運用メモ参照）
 docker rm -f vllm                    # コンテナで起動した場合
 sudo systemctl disable --now vllm    # 運用メモの systemd 化をした場合
 pkill -f "vllm serve"                # 直接起動した場合
@@ -540,7 +541,29 @@ rm -f ~/vllm.log
 
 ## 運用メモ
 
-安定した設定が決まったら、systemd で常駐化して毎回同じ値で起動する。
+### 再起動後も自動で起動する（コンテナで導入した場合）
+
+コンテナで導入した場合は、Docker の再起動ポリシーを付けるのが簡単。動作中のコンテナにそのまま適用できるので、作り直しやモデルのダウンロードのやり直しは要らない。
+
+```bash
+# 1. 自動で再起動するように設定（動作中のコンテナにそのまま適用される）
+docker update --restart unless-stopped vllm
+
+# 2. Docker 自体が OS 起動時に立ち上がるか確認（enabled ならよい）
+systemctl is-enabled docker
+
+# 3. Ollama が起動時に立ち上がってメモリを取らないようにする
+sudo systemctl disable --now ollama
+```
+
+- 再起動後は、モデルの読み込みとウォームアップに数分かかる。`Application startup complete` が出るまでは `Connection refused` になる
+- 手動で止めるときは `docker stop vllm`。`unless-stopped` なので、手動で止めた場合は次の再起動では立ち上がらない
+- コンテナを作り直すときは、`docker run` に `--restart unless-stopped` を付けておけば同じ設定になる
+- Ollama に戻すときは、「Ollama に戻す手順」の前に `docker update --restart no vllm` を実行する。実行しないと、再起動のたびに vLLM が立ち上がり Ollama とメモリを取り合う
+
+### systemd で常駐化する
+
+安定した設定が決まったら、systemd で常駐化して毎回同じ値で起動する方法もある。Docker の再起動ポリシーを使う場合は不要。
 
 ```ini
 # /etc/systemd/system/vllm.service
