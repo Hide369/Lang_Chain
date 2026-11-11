@@ -60,6 +60,10 @@ class ClaudeCodeLLM:
             "ANTHROPIC_DEFAULT_SONNET_MODEL": self.model,
             "ANTHROPIC_DEFAULT_HAIKU_MODEL": self.model,
             "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(self.max_output_tokens),
+            # シンキングを止める。ローカルモデル（Qwen3-Coder-Next）はシンキングしないため、指定したままだと
+            # vLLM が reasoning parser のエラーを返すか、応答全体がシンキング扱いになり本文が空になる。
+            # 実行ユーザーの ~/.claude/settings.json に頼らず、バッチでは必ず止める
+            "MAX_THINKING_TOKENS": "0",
             # テレメトリ等、モデル以外への通信を止める
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         })

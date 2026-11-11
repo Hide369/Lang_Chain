@@ -100,6 +100,7 @@ cd /opt/Lang_Chain && .venv/bin/python -m pytest
 
 推論サーバーの接続先（`ANTHROPIC_BASE_URL` など。`.env` の `LLM_BASE_URL` から作る）は runner が `claude` の起動時に設定するため、シェルに設定する必要はない。
 テレメトリなどモデル以外への通信も `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` で止めている。
+シンキングも `MAX_THINKING_TOKENS=0` で止めている（ローカルモデルはシンキングしないため。指定したままだと vLLM でエラーになるか本文が空になる）。
 
 ### SKILL.md の扱い
 

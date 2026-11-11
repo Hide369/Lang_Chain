@@ -18,6 +18,7 @@ record = {
     "base_url": os.environ.get("ANTHROPIC_BASE_URL"),
     "haiku_model": os.environ.get("ANTHROPIC_DEFAULT_HAIKU_MODEL"),
     "nonessential_traffic": os.environ.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"),
+    "max_thinking_tokens": os.environ.get("MAX_THINKING_TOKENS"),
 }
 with calls_path.open("a", encoding="utf-8") as f:
     f.write(json.dumps(record, ensure_ascii=False) + "\n")
