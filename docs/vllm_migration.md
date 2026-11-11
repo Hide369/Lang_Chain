@@ -349,6 +349,28 @@ CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
 - [ ] `/v1/messages` が応答する（`404` なら vLLM が古く Anthropic 互換エンドポイントがない。新しいタグのコンテナにする）
 - [ ] `claude -p` が応答する
 
+### Claude Code のシンキングを止める（必須）
+
+Qwen3-Coder-Next はシンキングしないモデルなので、Claude Code 側でシンキングを止めておく。止めないと、次のどちらかになる。
+
+- **`--reasoning-parser` なしで起動した場合**：Claude Code はシンキングを使う指定を付けてリクエストを送る。vLLM 側にそれを処理する reasoning parser がないため、サーバー側で reasoning parser のエラーが出る
+- **`--reasoning-parser qwen3` を付けて起動した場合**：vLLM は応答の中からシンキングの区切り（`</think>`）を探すが、Qwen3-Coder-Next はこの区切りを出さない。そのため応答全体がシンキング扱いになり、本文が空になる。VS Code のチャット欄では、シンキングだけ表示されてレスポンスが表示されない
+
+vLLM の起動コマンドには `--reasoning-parser` を**付けない**。そのうえで、Claude Code の設定（`~/.claude/settings.json`）でシンキングを止める。
+
+```json
+{
+  "alwaysThinkingEnabled": false,
+  "env": {
+    "MAX_THINKING_TOKENS": "0"
+  }
+}
+```
+
+- VS Code の拡張機能で使う場合は、設定後に VS Code を再読み込みする。チャット欄にシンキングの切り替えがあれば、そちらもオフにする
+- アプリのヘッドレスバッチ（`claude -p`）も同じ設定ファイルを読む。実行ユーザーの `~/.claude/settings.json` に入れるか、起動時の環境変数に `MAX_THINKING_TOKENS=0` を加える
+- Claude Code のバージョンによっては、この設定だけではシンキングが止まらないという報告がある。その場合は、サーバー側のエラー全文を確認し、案2の LiteLLM Proxy でシンキング指定を取り除く方法を検討する
+
 ### 案2: LiteLLM Proxy で名前を付け替える
 
 vLLM は元の名前のまま起動し、前に置いた LiteLLM Proxy で Claude 名を vLLM のモデルに対応させる。docs/proxy の構成に組み込める。モデルや GB10 を複数台にしたとき、バッチ用と対話用で使うモデルを分けたいときに向く。
@@ -386,6 +408,8 @@ model_list:
 | CUDA グラフ取得中に落ちる | グラフ用メモリ不足 | `--enforce-eager` を追加 |
 | 端末が固まる・OS が応答しない | OS の分まで使い切った | 再起動後、`--gpu-memory-utilization 0.75`・`--max-model-len 131072` で起動し直す |
 | 推論中に落ちる | 長い入力や同時リクエストで KV 不足 | `--max-num-seqs` と `--max-model-len` を下げる |
+| VS Code（Claude Code）から使うと、サーバー側で reasoning parser のエラーが出る | Claude Code がシンキングを指定してリクエストしている | 手順5の「Claude Code のシンキングを止める」で、Claude Code 側のシンキングをオフにする |
+| `--reasoning-parser` を付けると、シンキングは表示されるがレスポンスが表示されない | Qwen3-Coder-Next はシンキングの区切りを出さないため、応答全体がシンキング扱いになる | `--reasoning-parser` を外して起動し直し、Claude Code 側のシンキングをオフにする |
 | ツール呼び出しを含む長い入力で `!!!!` が延々と出る | ツール呼び出しの解釈の不具合（報告例あり） | `--tool-call-parser qwen3_xml` に変えて起動し直す |
 
 上の対処をすべて試しても Qwen3-Coder-Next が安定しない場合は、次の「gpt-oss-120b に切り替える手順」に進む。
