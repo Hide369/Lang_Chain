@@ -55,6 +55,16 @@ async def test_first_call_starts_session_with_skill_and_read_only_tools(fake_cla
     assert call["nonessential_traffic"] == "1"
 
 
+async def test_thinking_is_disabled_even_if_the_user_environment_enables_it(fake_claude, tmp_path, monkeypatch):
+    # Qwen3-Coder-Next はシンキングしないため、シンキング指定のリクエストは vLLM でエラーになるか、本文が空になる
+    monkeypatch.setenv("MAX_THINKING_TOKENS", "31999")
+    fake_claude.respond(claude_result("# 設計書"))
+
+    await make_llm(fake_claude, tmp_path).ainvoke([HumanMessage("作成して")])
+
+    assert fake_claude.calls()[0]["max_thinking_tokens"] == "0"
+
+
 async def test_conversation_continuation_is_rejected_without_starting_claude(fake_claude, tmp_path):
     # 毎回新しいセッションで起動するため、過去の応答を黙って捨てずにエラーにする
     messages = [
