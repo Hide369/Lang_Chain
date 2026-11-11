@@ -19,7 +19,7 @@ GB10 上で vLLM を起動するときは、確保メモリ量を明示的に絞
 3. 手順1: Ollama を止める（アンインストールはしない）
 4. 手順1.5: vLLM を導入する（初回のみ）
 5. 手順2〜4: キャッシュを解放し、vLLM を起動して動作を確認する
-6. 手順5: アプリ（`.env`・systemd のユニット）を vLLM に向け、Web 画面を起動し直す
+6. 手順5: アプリ（Claude Code ヘッドレス）の接続先とモデル名を vLLM に合わせ、アプリを vLLM 対応版に入れ替える（`.env`・systemd のユニット）
 7. Qwen3-Coder-Next が動かなければ「[gpt-oss-120b に切り替える手順](#gpt-oss-120b-に切り替える手順qwen3-coder-next-が失敗したとき)」で vLLM のままモデルを替える
 8. それでも失敗したら「[Ollama に戻す手順](#ollama-に戻す手順いつでも実行可)」で元に戻す（どの段階からでも実行できる）
 9. vLLM をもう使わないなら「[vLLM を削除する手順](#vllm-を削除する手順やめる場合)」で片付ける
@@ -130,7 +130,32 @@ docker run --rm --gpus all nvcr.io/nvidia/vllm:<タグ> nvidia-smi
 mkdir -p ~/.cache/huggingface
 ```
 
-手順3の `vllm serve` は、次のようにコンテナ内で実行する。モデル（約85GB）は初回起動時に自動でダウンロードされる。
+### モデルを先にダウンロードする（進捗を見るため）
+
+モデル（約85GB）は `vllm serve` の初回起動時にも自動でダウンロードされるが、`-d` で起動するとダウンロードの進捗が見えず、止まったのか進んでいるのか区別できない。先にダウンロードだけを単独で実行しておくと、進捗バーが表示される。
+
+```bash
+# 同じイメージを使うので、ホスト側への追加インストールは不要
+# -it を付けると、ファイルごとの進捗バーが表示される。途中で止まっても再実行すれば続きから再開する
+docker run --rm -it \
+  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  nvcr.io/nvidia/vllm:<タグ> \
+  hf download Qwen/Qwen3-Coder-Next-FP8
+# hf コマンドがないと出た場合は huggingface-cli download に置き換える
+```
+
+- `You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN...` という警告が出ても、ダウンロードは続く。公開モデルなのでトークンは必須ではない（速度制限が厳しくなるだけ）。警告を消したい場合は、Hugging Face で Read 権限のトークンを作り、`-e HF_TOKEN=<トークン>` を付ける
+- ダウンロード済みのモデルは `~/.cache/huggingface` に残り、次の `vllm serve` はそれを使う
+
+すでに `vllm serve` のコンテナでダウンロードが始まっている場合は、別の端末で容量の増え方を見る。約85GBに近づけば終わりかけている。
+
+```bash
+watch -n 10 'du -sh ~/.cache/huggingface/hub/models--Qwen--Qwen3-Coder-Next-FP8'
+```
+
+### コンテナで vLLM を起動する
+
+手順3の `vllm serve` は、次のようにコンテナ内で実行する。`-d` を付けているので、コマンドはコンテナIDを1行表示してすぐ終わる。以降の処理はバックグラウンドで進むため、止まったわけではない。状況は `docker logs -f vllm` で見る。
 
 ```bash
 docker run -d --name vllm --gpus all --network host --ipc=host \
@@ -201,6 +226,52 @@ vllm serve Qwen/Qwen3-Coder-Next-FP8 \
 
 ## 手順4: 起動確認と動作テスト
 
+vLLM は、モデルの読み込みとウォームアップがすべて終わってから API を受け付ける。それまでは `curl` が `Connection refused` になるが、これは正常な挙動。`docker logs -f vllm` で、次の順に進むのを待つ。
+
+1. `Loading safetensors checkpoint shards: xx%`（モデルの読み込み）
+2. `torch.compile` / `Capturing CUDA graphs`（ウォームアップ。数分止まって見えることがある）
+3. `Application startup complete` / `Uvicorn running on http://0.0.0.0:8000`（起動完了。ここから `curl` が通る）
+
+途中で止まって見えるときは、次で進んでいるかを確かめる。
+
+```bash
+docker ps -a        # STATUS が Up なら動作中、Exited なら落ちている（docker logs の末尾にエラーが出る）
+free -h             # used が増えていれば読み込み中
+```
+
+ログが `Using FlashInfer attention backend` で止まって見える場合は、まだ重みの読み込み前の段階にいる。vLLM はこの後に重みのダウンロードと読み込みに入るが、`-d` で起動していると、その間ログには何も出ない。次の2つで、どちらの処理中かを切り分ける。
+
+```bash
+# 1. ダウンロード中か（数分おきに実行して増えているか）
+du -sh ~/.cache/huggingface/hub/models--Qwen--Qwen3-Coder-Next-FP8
+
+# 2. FlashInfer のカーネルをコンパイル中か（nvcc や ninja が出ていればコンパイル中）
+docker top vllm | grep -E "nvcc|ninja|cicc"
+```
+
+- 容量が増えている → ダウンロード中。約85GBになるまで待つ
+- nvcc などが動いている → GB10 向けに初回だけカーネルをコンパイルしている。数十分かかることがあるが、2回目以降は速い
+- どちらも変化がない → 止まっている。`docker rm -f vllm` で止め、手順1.5の「モデルを先にダウンロードする」で先にダウンロードする
+
+ダウンロード中でも、容量の増え方が極端に遅い場合がある（例: 1時間半で11GB。このままでは85GBまで数時間以上かかる）。数分おいて `du -sh` を再実行し、増えていれば「遅いだけ」、同じ値のままなら「止まっている」。どちらの場合も、次のように進捗が見える形に切り替える。ダウンロード済みの分はそのまま使われ、続きから再開する。
+
+```bash
+# 1. 今のコンテナを止める
+docker rm -f vllm
+
+# 2. 進捗バー付きでダウンロード（トークンを付けると速度制限がゆるくなる）
+docker run --rm -it \
+  -e HF_TOKEN=hf_xxxxxxxx \
+  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  nvcr.io/nvidia/vllm:<タグ> \
+  hf download Qwen/Qwen3-Coder-Next-FP8
+```
+
+- 起動時の `Please set a HF_TOKEN` の警告は、未認証だと速度が制限されるという意味。ダウンロードが遅い主な原因になりうる
+- トークンは https://huggingface.co/settings/tokens で、Read 権限のものを無料で作れる
+- 進捗バーに出る速度（MB/s）が、トークンを付けても遅い場合は、回線やプロキシ側の問題を疑う
+- ダウンロードが終わったら、手順1.5の `docker run -d ...` で vLLM を起動し直す
+
 ログに起動完了が出たら、API を叩いて応答とメモリ残量を確認する。
 
 ```bash
@@ -223,9 +294,113 @@ watch -n 2 free -h
 - [ ] 推論中も `available` が 10GB 以上残っている（OS の余裕）
 - [ ] ログに `KV cache` の確保量と最大同時処理数が出ている（`grep -i "kv cache" ~/vllm.log`）。262144 トークンが収まっていること
 
-## 手順5: アプリ（Web 画面・夜間バッチ）を vLLM に向ける
+## 手順5: アプリ（Claude Code ヘッドレス）から使う
 
-vLLM の動作を確認したら、アプリの設定を vLLM に向ける。事前確認・戻し方を含む詳しい設置手順は [migration_vllm_app.md](migration_vllm_app.md) を参照（ここはその要約）。アプリは推論サーバーを OpenAI 互換の `/v1/models` で事前チェックし、Claude Code から Anthropic 互換の `/v1/messages` を呼ぶ（どちらも vLLM・Ollama の両方にある）。
+アプリはバッチ処理で `claude -p --model <LLM_MODEL>` を起動する。ヘッドレスモードの Claude Code は Claude のモデル名しか受け付けないため、Ollama では Modelfile で既存モデルを Claude 名で包んでいた。vLLM には Modelfile がないので、代わりに `--served-model-name` で Claude 名の別名を付ける。
+
+`--served-model-name` には名前を複数書ける。どの名前で呼んでも同じモデルが応答する。重みは1つだけ読み込まれるので、メモリは増えない。
+
+### 案1: `--served-model-name` に Claude 名の別名を足す（推奨）
+
+Modelfile の直接の代わりになる。手順1.5・3 の起動コマンドの `--served-model-name` を次のようにする。`claude-sonnet-4-5` の部分は、Ollama の Modelfile で付けていた名前と同じにする。
+
+```bash
+docker run -d --name vllm --gpus all --network host --ipc=host \
+  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  nvcr.io/nvidia/vllm:<タグ> \
+  vllm serve Qwen/Qwen3-Coder-Next-FP8 \
+    --served-model-name claude-sonnet-4-5 qwen3-coder-next \
+    --host 0.0.0.0 --port 8000 \
+    --gpu-memory-utilization 0.8 \
+    --max-model-len 262144 \
+    --max-num-seqs 2 \
+    --kv-cache-dtype fp8 \
+    --enable-auto-tool-choice --tool-call-parser qwen3_coder
+```
+
+アプリの `.env` を vLLM に向ける。接続先は `LLM_BASE_URL` に書く（`claude` 起動時の `ANTHROPIC_BASE_URL` と、実行前の事前チェックに使われる）。末尾に `/v1` は付けない（Claude Code が `/v1/messages` を付ける）。`LLM_MODEL` は `--served-model-name` の先頭の名前にする。
+
+```bash
+# /opt/Lang_Chain/.env
+LLM_BASE_URL=http://127.0.0.1:8000
+LLM_MODEL=claude-sonnet-4-5
+```
+
+- 以前の版のアプリは `OLLAMA_BASE_URL` しか読まない。この版でも `LLM_BASE_URL` がなければ `OLLAMA_BASE_URL` を使うが、vLLM では `LLM_BASE_URL` を書き、`OLLAMA_BASE_URL` の行は消す
+- 以前の版のアプリは、実行前の事前チェックで Ollama 固有の API を呼ぶため、vLLM では必ず失敗する。下の「アプリを vLLM 対応版に入れ替える」を行う
+
+- アプリは `ANTHROPIC_DEFAULT_OPUS_MODEL`・`SONNET`・`HAIKU` をすべて `LLM_MODEL` にするので、別名は1つあれば足りる。補助処理（haiku 系）も同じ名前で vLLM に届く
+- アプリは `ANTHROPIC_AUTH_TOKEN=local` を渡す（以前の版は `ollama`）。vLLM を `--api-key` なしで起動していれば値は見られない
+- `/v1/models` の一覧と応答の `model` 欄には先頭の名前（`claude-sonnet-4-5`）が出る
+- gpt-oss-120b で動かす場合も同じ。`--served-model-name claude-sonnet-4-5 gpt-oss-120b` とし、`.env` の `LLM_NUM_CTX=131072` は「gpt-oss-120b に切り替える手順」のとおりにする
+- 運用メモの systemd 化をする場合は、`ExecStart` の `--served-model-name` も同じにする
+
+起動後、Claude Code が使う Anthropic 互換の `/v1/messages` に Claude 名で応答が返るかを確かめる。
+
+```bash
+# 1. 別名が一覧に出るか
+curl http://localhost:8000/v1/models
+
+# 2. Anthropic 互換エンドポイントに Claude 名で届くか
+curl http://localhost:8000/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{"model":"claude-sonnet-4-5","max_tokens":64,"messages":[{"role":"user","content":"こんにちは"}]}'
+
+# 3. Claude Code のヘッドレスモードで届くか
+ANTHROPIC_BASE_URL=http://127.0.0.1:8000 ANTHROPIC_AUTH_TOKEN=local ANTHROPIC_API_KEY= \
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+  claude -p "こんにちは。1行で返答してください。" --model claude-sonnet-4-5
+```
+
+- [ ] `/v1/models` に `claude-sonnet-4-5` が出る
+- [ ] `/v1/messages` が応答する（`404` なら vLLM が古く Anthropic 互換エンドポイントがない。新しいタグのコンテナにする）
+- [ ] `claude -p` が応答する
+
+### Claude Code のシンキングを止める（必須）
+
+Qwen3-Coder-Next はシンキングしないモデルなので、Claude Code 側でシンキングを止めておく。止めないと、次のどちらかになる。
+
+- **`--reasoning-parser` なしで起動した場合**：Claude Code はシンキングを使う指定を付けてリクエストを送る。vLLM 側にそれを処理する reasoning parser がないため、サーバー側で reasoning parser のエラーが出る
+- **`--reasoning-parser qwen3` を付けて起動した場合**：vLLM は応答の中からシンキングの区切り（`</think>`）を探すが、Qwen3-Coder-Next はこの区切りを出さない。そのため応答全体がシンキング扱いになり、本文が空になる。VS Code のチャット欄では、シンキングだけ表示されてレスポンスが表示されない
+
+vLLM の起動コマンドには `--reasoning-parser` を**付けない**。そのうえで、Claude Code の設定（`~/.claude/settings.json`）でシンキングを止める。
+
+```json
+{
+  "alwaysThinkingEnabled": false,
+  "env": {
+    "MAX_THINKING_TOKENS": "0"
+  }
+}
+```
+
+- VS Code の拡張機能で使う場合は、設定後に VS Code を再読み込みする。チャット欄にシンキングの切り替えがあれば、そちらもオフにする
+- アプリのヘッドレスバッチ（`claude -p`）も同じ設定ファイルを読む。実行ユーザーの `~/.claude/settings.json` に入れるか、起動時の環境変数に `MAX_THINKING_TOKENS=0` を加える
+- Claude Code のバージョンによっては、この設定だけではシンキングが止まらないという報告がある。その場合は、サーバー側のエラー全文を確認し、案2の LiteLLM Proxy でシンキング指定を取り除く方法を検討する
+
+### 案2: LiteLLM Proxy で名前を付け替える
+
+vLLM は元の名前のまま起動し、前に置いた LiteLLM Proxy で Claude 名を vLLM のモデルに対応させる。docs/proxy の構成に組み込める。モデルや GB10 を複数台にしたとき、バッチ用と対話用で使うモデルを分けたいときに向く。
+
+```yaml
+# LiteLLM の config.yaml（抜粋）
+model_list:
+  - model_name: claude-sonnet-4-5
+    litellm_params:
+      model: hosted_vllm/qwen3-coder-next
+      api_base: http://gb10:8000/v1
+```
+
+- `.env` の `LLM_BASE_URL` は Proxy の URL に、`LLM_MODEL` は `model_name` の値にする（事前チェックは Proxy の `/v1/models` に `model_name` が出ることを確かめる）
+- 経由する段が1つ増えるので、まず案1で動くことを確かめてから移すとよい
+
+### 案3: Claude Code のモデル別名だけで済ませる（要検証）
+
+`--model sonnet` と別名で指定し、`ANTHROPIC_DEFAULT_SONNET_MODEL` などに vLLM 側の名前（`qwen3-coder-next`）を入れる方法。vLLM 側は変えずに済む。ただし、アプリは `--model` と `ANTHROPIC_DEFAULT_*_MODEL` に同じ `LLM_MODEL` を渡すため、アプリの修正が要る。ヘッドレスモードのモデル名の確認をこれで通れるかも、使う Claude Code のバージョンで試してから採用する。
+
+### アプリを vLLM 対応版に入れ替える（Web 画面・夜間バッチ）
+
+上の確認が済んだら、アプリ自体を vLLM 対応版に入れ替える。事前確認・戻し方を含む詳しい設置手順は [migration_vllm_app.md](migration_vllm_app.md) を参照（ここはその要約）。アプリは推論サーバーを OpenAI 互換の `/v1/models` で事前チェックし、Claude Code から Anthropic 互換の `/v1/messages` を呼ぶ（どちらも vLLM・Ollama の両方にある）。
 
 ```bash
 cd /opt/Lang_Chain
@@ -234,7 +409,7 @@ cd /opt/Lang_Chain
 git pull
 .venv/bin/pip install -r requirements.txt
 
-# 2. .env を vLLM 向けに変える（OLLAMA_BASE_URL の行は消すか、LLM_BASE_URL を書けば LLM_BASE_URL が優先される）
+# 2. .env を vLLM 向けに変える（OLLAMA_BASE_URL の行は消す。残っていても LLM_BASE_URL が優先される）
 #    LLM_BASE_URL=http://127.0.0.1:8000
 #    LLM_MODEL=claude-sonnet-4-5          # --served-model-name と同じ
 #    LLM_NUM_CTX=262144                   # --max-model-len と同じ
@@ -264,7 +439,7 @@ sudo systemctl start godoc-nightly.timer
 
 以後、`.env` の `LLM_*`・`CLAUDE_*` などだけを変えたときは `sudo systemctl reload godoc-web` で読み直せる（実行中のバッチは止めず、次の実行から反映）。`WEB_*` を変えたとき・コードを更新したときは `restart` する。
 
-### `systemctl reload godoc-web` が失敗していた理由
+#### `systemctl reload godoc-web` が失敗していた理由
 
 - 旧版のユニットには `ExecReload=` がなく、`Job type reload is not applicable for unit godoc-web.service` で失敗していた（`.env` を読み直す仕組み自体がなかった）
 - 旧版のユニットは `Wants=`・`After=ollama.service` を持っていた。「運用メモ」の `vllm.service`（`Conflicts=ollama.service`）と同時に使うと、godoc-web の起動・再起動で ollama.service の起動が要求され、vLLM と衝突して失敗する（または vLLM が止まる）
@@ -274,12 +449,21 @@ sudo systemctl start godoc-nightly.timer
 
 | 症状 | 考えられる原因 | 対処 |
 | --- | --- | --- |
+| ログが `Using FlashInfer attention backend` から進まない | 重みのダウンロード中か、FlashInfer のカーネルを初回コンパイル中 | 手順4の切り分け（`du -sh` と `docker top vllm`）で確認する |
+| `docker run -d` の後、何も表示されず止まったように見える | `-d` でバックグラウンド起動しているため。初回はモデル（約85GB）のダウンロード中で、進捗も出ない | `docker logs -f vllm` で確認する。進捗を見たい場合は、手順1.5の「モデルを先にダウンロードする」で先にダウンロードする |
+| `curl http://localhost:8000/v1/models` が `Connection refused` | まだ読み込み・ウォームアップ中か、コンテナが落ちている | `docker ps -a` で Up か確認。Up なら `Application startup complete` が出るまで待つ。Exited なら `docker logs vllm` の末尾のエラーを見る |
+| `/v1/models` が `401 Unauthorized` | 起動時に `--api-key` を付けている | `-H "Authorization: Bearer <キー>"` を付けて呼ぶ |
+| `Please set a HF_TOKEN` の警告が出る | Hugging Face に未認証でアクセスしている | 警告だけで処理は続く。消したい場合は `-e HF_TOKEN=<トークン>` を付ける |
+| モデルのダウンロードが極端に遅い・途中で止まる | 未認証のため速度が制限されている、または回線の問題 | `docker rm -f vllm` で止め、`-e HF_TOKEN=<トークン>` を付けて `hf download` で進捗を見ながらダウンロードし直す（手順4参照）。続きから再開する |
+| 読み込みが進まない・途中で落ちる | Ollama がモデルを保持したままで、メモリが足りない | 手順1で Ollama を止め、`free -h` で `available` を確認してから `docker rm -f vllm` で作り直す |
 | 起動時に `CUDA out of memory` | 予約割合が空きより大きい | 手順1・2を実施する。それでも出る場合は `--gpu-memory-utilization` を 0.75 まで下げ、`--max-model-len` も下げる |
 | `No available memory for the cache blocks` | 重みを載せた後に KV キャッシュの余地がない | `--max-model-len` を下げる、`fp8` KV キャッシュを使う。`--gpu-memory-utilization` は 0.85 までにとどめる |
 | `max_model_len` が KV キャッシュに収まらないと出る | コンテキスト長が大きすぎる | `--max-model-len` をエラーが示す値以下にし、`.env` の `LLM_NUM_CTX` も揃える |
 | CUDA グラフ取得中に落ちる | グラフ用メモリ不足 | `--enforce-eager` を追加 |
 | 端末が固まる・OS が応答しない | OS の分まで使い切った | 再起動後、`--gpu-memory-utilization 0.75`・`--max-model-len 131072` で起動し直す |
 | 推論中に落ちる | 長い入力や同時リクエストで KV 不足 | `--max-num-seqs` と `--max-model-len` を下げる |
+| VS Code（Claude Code）から使うと、サーバー側で reasoning parser のエラーが出る | Claude Code がシンキングを指定してリクエストしている | 手順5の「Claude Code のシンキングを止める」で、Claude Code 側のシンキングをオフにする |
+| `--reasoning-parser` を付けると、シンキングは表示されるがレスポンスが表示されない | Qwen3-Coder-Next はシンキングの区切りを出さないため、応答全体がシンキング扱いになる | `--reasoning-parser` を外して起動し直し、Claude Code 側のシンキングをオフにする |
 | ツール呼び出しを含む長い入力で `!!!!` が延々と出る | ツール呼び出しの解釈の不具合（報告例あり） | `--tool-call-parser qwen3_xml` に変えて起動し直す |
 | 実行がすぐ `推論サーバーに接続できません` で終わる | vLLM が止まっている、または `LLM_BASE_URL` が違う | `curl http://127.0.0.1:8000/v1/models` で確認し、`.env` の `LLM_BASE_URL` を直して `sudo systemctl reload godoc-web` |
 | 実行がすぐ `モデル 'xxx' が推論サーバーにありません` で終わる | `LLM_MODEL` と `--served-model-name` が違う | エラーに出る「提供中」の名前に `LLM_MODEL` を揃えて `sudo systemctl reload godoc-web` |
@@ -359,6 +543,7 @@ vLLM の導入や起動に失敗したとき、または試用をやめるとき
 
 ```bash
 # 1. vLLM を止める（起動方法に合う行だけでよい。該当しない行のエラーは無視できる）
+docker update --restart no vllm      # 再起動ポリシーを付けていた場合（運用メモ参照）
 docker rm -f vllm                    # コンテナで起動した場合
 sudo systemctl disable --now vllm    # 運用メモの systemd 化をした場合
 pkill -f "vllm serve"                # 直接起動した場合
@@ -376,7 +561,7 @@ ollama list | diff - ~/ollama-backup/ollama-list.txt
 curl http://127.0.0.1:11434/api/tags
 
 # 5. アプリの .env を戻して、Web画面を再起動（LLM_BASE_URL の行が消えるので reload ではなく restart。
-#    控えた .env の OLLAMA_BASE_URL・LLM_MODEL=qwen3-coder-next がそのまま使われる）
+#    控えた .env の OLLAMA_BASE_URL・LLM_MODEL（Modelfile で付けた Claude 名）がそのまま使われる）
 cp ~/ollama-backup/env.bak /opt/Lang_Chain/.env
 sudo systemctl restart godoc-web
 
@@ -438,7 +623,29 @@ rm -f ~/vllm.log
 
 ## 運用メモ
 
-安定した設定が決まったら、systemd で常駐化して毎回同じ値で起動する。
+### 再起動後も自動で起動する（コンテナで導入した場合）
+
+コンテナで導入した場合は、Docker の再起動ポリシーを付けるのが簡単。動作中のコンテナにそのまま適用できるので、作り直しやモデルのダウンロードのやり直しは要らない。
+
+```bash
+# 1. 自動で再起動するように設定（動作中のコンテナにそのまま適用される）
+docker update --restart unless-stopped vllm
+
+# 2. Docker 自体が OS 起動時に立ち上がるか確認（enabled ならよい）
+systemctl is-enabled docker
+
+# 3. Ollama が起動時に立ち上がってメモリを取らないようにする
+sudo systemctl disable --now ollama
+```
+
+- 再起動後は、モデルの読み込みとウォームアップに数分かかる。`Application startup complete` が出るまでは `Connection refused` になる
+- 手動で止めるときは `docker stop vllm`。`unless-stopped` なので、手動で止めた場合は次の再起動では立ち上がらない
+- コンテナを作り直すときは、`docker run` に `--restart unless-stopped` を付けておけば同じ設定になる
+- Ollama に戻すときは、「Ollama に戻す手順」の前に `docker update --restart no vllm` を実行する。実行しないと、再起動のたびに vLLM が立ち上がり Ollama とメモリを取り合う
+
+### systemd で常駐化する
+
+安定した設定が決まったら、systemd で常駐化して毎回同じ値で起動する方法もある。Docker の再起動ポリシーを使う場合は不要。
 
 ```ini
 # /etc/systemd/system/vllm.service
