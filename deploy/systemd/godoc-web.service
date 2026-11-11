@@ -1,7 +1,10 @@
 [Unit]
 Description=バッチ実行の Web 画面
-Wants=network-online.target ollama.service
-After=network-online.target ollama.service
+# 推論サーバー（vLLM / Ollama）には依存させない。ollama.service を Wants にすると、
+# Conflicts=ollama.service を持つ vllm.service と衝突して起動・再起動が失敗する（または vLLM が止まる）。
+# 推論サーバーが動いているかは、各実行の開始時に preflight が確認する
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 Type=simple
@@ -10,6 +13,8 @@ User=REPLACE_WITH_USER
 WorkingDirectory=/opt/Lang_Chain
 # 設定（WEB_* など）は /opt/Lang_Chain/.env から読む
 ExecStart=/opt/Lang_Chain/.venv/bin/python -m godoc_agent.web
+# `systemctl reload` で .env を読み直す（実行中のバッチは止めず、次の実行から反映。WEB_* の変更は restart が必要）
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5
 # 停止時、実行中の runner・claude も一緒に止める（完了済みのファイルは manifest に残る）

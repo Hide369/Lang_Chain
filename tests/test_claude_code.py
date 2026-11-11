@@ -11,15 +11,15 @@ from godoc_agent.config import load_settings
 from godoc_agent.go_source import extract_facts
 from godoc_agent.prompts import build_agent_messages, load_skill
 
-MODEL = "qwen3-coder-next"
-BASE_URL = "http://127.0.0.1:11434"
+MODEL = "claude-sonnet-4-5"
+BASE_URL = "http://127.0.0.1:8000"
 
 
 def make_llm(fake_claude, cwd: Path, *, timeout_s: float = 30) -> ClaudeCodeLLM:
     return ClaudeCodeLLM(
         fake_claude.command,
         model=MODEL,
-        ollama_base_url=BASE_URL,
+        llm_base_url=BASE_URL,
         cwd=cwd,
         add_dirs=[cwd / "skill"],
         max_turns=7,
@@ -49,7 +49,7 @@ async def test_first_call_starts_session_with_skill_and_read_only_tools(fake_cla
     assert option(argv, "--add-dir") == str(tmp_path / "skill")
     assert "--resume" not in argv
     assert os.path.samefile(call["cwd"], tmp_path)
-    # モデルへの接続先はローカルのOllamaだけで、補助モデルもローカルモデルに向いている
+    # モデルへの接続先はローカルの推論サーバーだけで、補助モデルもローカルモデルに向いている
     assert call["base_url"] == BASE_URL
     assert call["haiku_model"] == MODEL
     assert call["nonessential_traffic"] == "1"
@@ -84,7 +84,7 @@ async def test_input_token_usage_is_recorded(fake_claude, tmp_path):
 
 @pytest.mark.parametrize("usage", [{}, None])
 async def test_missing_usage_is_recorded_as_none(fake_claude, tmp_path, usage):
-    # Ollama が usage を返さない（項目がない・null）場合も、失敗にせず None として残す
+    # 推論サーバーが usage を返さない（項目がない・null）場合も、失敗にせず None として残す
     response = claude_result("# 設計書")
     if usage is None:
         response["json"]["usage"] = None

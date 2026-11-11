@@ -161,7 +161,7 @@ def context_warnings(llm_calls: list[dict] | None, settings: Settings) -> list[s
     """入力トークン数が LLM_NUM_CTX の LLM_CTX_WARN_RATIO を超えた実行を警告にする。
 
     Ollama はコンテキスト超過分を黙って切り捨てるため、検証に合格していても入力の一部が
-    読まれていない可能性がある。合否の判定はグラフに任せ、ここでは注意として残すだけにする。
+    読まれていない可能性がある（vLLM は超過するとリクエストごと失敗するが、上限に近いことは同じく知らせる）。合否の判定はグラフに任せ、ここでは注意として残すだけにする。
     """
     warnings = []
     for i, call in enumerate(llm_calls or [], start=1):
@@ -295,10 +295,10 @@ async def _run_batch(args: argparse.Namespace, settings: Settings, repo: Path, o
     if not total:
         return 0
 
-    if targets:  # 読み込めないファイルだけのときは、Ollama に接続できなくても結果を記録できるようにする
+    if targets:  # 読み込めないファイルだけのときは、推論サーバーに接続できなくても結果を記録できるようにする
         await preflight(settings)
     metrics_path = out_dir / "_runs" / f"{args.run_id}.jsonl"
-    # 同時に動く claude の数（セッション枠の数）はタスクをまたいだ合計で抑える（Ollama の並列数に合わせるため）
+    # 同時に動く claude の数（セッション枠の数）はタスクをまたいだ合計で抑える（推論サーバーの同時処理数に合わせるため）
     concurrency = args.concurrency or settings.concurrency
     print(f"同時セッション数={concurrency}", flush=True)
     results: list[FileResult] = []
