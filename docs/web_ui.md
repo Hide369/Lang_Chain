@@ -6,7 +6,7 @@
 ```
 クライアント PC（ブラウザ）            サーバー(GB10)
   http://192.168.31.26:4000  ───>  Web 画面（python -m godoc_agent.web、常駐）
-                                      └─ runner を別プロセスで起動 ── Claude Code ── Ollama
+                                      └─ runner を別プロセスで起動 ── Claude Code ── vLLM
 ```
 
 ソースコードと設計書の生成処理は、これまでどおりサーバーの中だけで行う。ブラウザに送るのは、画面の表示に必要なもの（ログ、生成物の本文、フォルダ名）だけ。
@@ -31,7 +31,7 @@
   - runner の中では、Claude Code のセッション（1ファイル×1タスク = 1セッション）を最大10個まで並列に動かせる（[セッションの監視](#セッションの監視)）
 - runner 本体も、出力先フォルダごとにロック（`<出力先>/.runner.lock`）を取る。夜間タイマー・コマンド・Web 画面のどこから起動しても、同じ出力先では同時に1つしか動かない。後から起動した方は `エラー: 別の実行が進行中です` で止まる（終了コード `2`）
   - 夜間タイマーが動いている間は、画面の状態に「他の実行が進行中（夜間バッチ・コマンド）」と表示され、実行ボタンは押せない
-  - 出力先が違う実行どうしは同時に動ける（データは壊れないが、Ollama を取り合うので遅くなる）。夜間タイマーと同じ出力先（既定 `/opt/Lang_Chain/out`）を選んでおくと確実に排他できる
+  - 出力先が違う実行どうしは同時に動ける（データは壊れないが、推論サーバーを取り合うので遅くなる）。夜間タイマーと同じ出力先（既定 `/opt/Lang_Chain/out`）を選んでおくと確実に排他できる
 - 実行中は設定（フォルダ・スキル・対象の設定）を変更できない。どの設定で動いた結果か分からなくなるのを防ぐため
 
 ### 停止
@@ -123,8 +123,8 @@ sudo ufw allow from 192.168.31.0/24 to any port 4000 proto tcp
 - runner が強制終了などで終了を書き出せなかった場合、処理中だった枠は「中断」と表示する
 - 同じ出来事は、全体のログにも `[S03] 生成 2/3 回目を開始` の形で出る。記録は `<出力先>/_runs/<run_id>.sessions.json`（夜間バッチ・コマンドからの実行も同じ）
 
-同時セッション数を増やしても、Ollama が同時に処理する数（`OLLAMA_NUM_PARALLEL`）より多い分は Ollama 側で待つだけで速くならない。
-10 並列にする場合は Ollama 側も `OLLAMA_NUM_PARALLEL=10` にし、KV キャッシュ（コンテキスト長 × 並列数に比例）が GPU メモリに収まるかを `ollama ps` で確かめる（[performance_troubleshooting.md](performance_troubleshooting.md)）。
+同時セッション数を増やしても、vLLM が同時に処理する数（`--max-num-seqs`）より多い分は vLLM 側で待つだけで速くならない。
+並列数を増やす場合は vLLM 側の `--max-num-seqs` も揃え、KV キャッシュ（コンテキスト長 × 並列数に比例）が収まるかを vLLM の起動ログ（`KV cache` の行）で確かめる（[performance_troubleshooting.md](performance_troubleshooting.md)）。
 定期実行は `.env` の `LLM_CONCURRENCY` で動く。
 
 ### 定期実行（毎日決まった時刻に実行する）
@@ -255,7 +255,8 @@ systemctl list-timers godoc-nightly.timer   # 表示されなければ止まっ�
 | 作業 | 方法 |
 |---|---|
 | 状態の確認 | `systemctl status godoc-web.service` / `journalctl -u godoc-web.service -n 50` |
-| 再起動（`.env` を変えたとき、`git pull` で更新したとき） | `sudo systemctl restart godoc-web.service` |
+| `.env` の読み直し（`LLM_*`・`CLAUDE_*` などを変えたとき。実行中のバッチは止めず、次の実行から反映） | `sudo systemctl reload godoc-web.service` |
+| 再起動（`WEB_*` を変えたとき、`git pull` で更新したとき） | `sudo systemctl restart godoc-web.service`（実行中のバッチも止まる） |
 | パスワードの変更 | `python -m godoc_agent.web.password` で作り直して `.env` を書き換え、再起動 |
 | 実行のログ | 画面のほか、`<出力先>/_runs/web-<日時>.log` に残る（計測ログは同じ名前の `.jsonl`、セッションの状況は `.sessions.json`） |
 

@@ -20,8 +20,8 @@ def _int_env(name: str, default: int, minimum: int = 1, maximum: int | None = No
     return value
 
 
-# 同時に動かす Claude Code のセッション数の上限。Ollama の並列数（OLLAMA_NUM_PARALLEL）と
-# GPU メモリ（並列数に比例して KV キャッシュが増える）の現実的な範囲に抑える
+# 同時に動かす Claude Code のセッション数の上限。推論サーバーの同時処理数（vLLM の --max-num-seqs、
+# Ollama の OLLAMA_NUM_PARALLEL）と GPU メモリ（並列数に比例して KV キャッシュが増える）の現実的な範囲に抑える
 MAX_CONCURRENCY = 10
 DEFAULT_CONCURRENCY = 2
 
@@ -66,9 +66,18 @@ def targets_config_path(base_dir: Path) -> Path:
     return local if local.is_file() else base_dir / "targets.example.toml"
 
 
+# 推論サーバー（vLLM）の既定の接続先。Claude Code はこの URL に /v1/messages を付けて呼ぶ
+DEFAULT_LLM_BASE_URL = "http://127.0.0.1:8000"
+
+
+def llm_base_url() -> str:
+    """推論サーバーの接続先。LLM_BASE_URL > OLLAMA_BASE_URL（Ollama 時代の .env をそのまま使えるように）の順に使う。"""
+    return os.getenv("LLM_BASE_URL") or os.getenv("OLLAMA_BASE_URL") or DEFAULT_LLM_BASE_URL
+
+
 @dataclass(frozen=True)
 class Settings:
-    ollama_base_url: str
+    llm_base_url: str
     model: str
     num_ctx: int
     ctx_warn_ratio: float
@@ -84,7 +93,8 @@ class Settings:
 
     @property
     def max_source_chars(self) -> int:
-        # Ollamaはコンテキスト超過を「黙って切り捨てる」ため、大きすぎるファイルは送る前に弾く。
+        # Ollama はコンテキスト超過を「黙って切り捨て」、vLLM はリクエストごと失敗させるため、
+        # どちらでも大きすぎるファイルは送る前に弾く。
         # 1トークン≒3文字（Goコード+日本語の保守的な見積り）とし、Claude Code の指示文・
         # スキル・関連ファイル・出力の分として半分をエージェントの作業領域に残す。
         return self.num_ctx * 3 // 2
@@ -112,7 +122,7 @@ def design_skill_path(base_dir: Path) -> Path:
 def load_settings() -> Settings:
     base_dir = APP_DIR
     return Settings(
-        ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
+        llm_base_url=llm_base_url(),
         model=os.getenv("LLM_MODEL", "qwen3-coder-next"),
         num_ctx=_int_env("LLM_NUM_CTX", 262144, minimum=4096),
         ctx_warn_ratio=_ratio_env("LLM_CTX_WARN_RATIO", 0.9),

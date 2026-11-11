@@ -1,6 +1,6 @@
 """Claude Code（ヘッドレスモード `claude -p`）で設計書を生成するアダプター。
 
-モデルは Ollama の Anthropic 互換APIで動かすため、ソースコードはサーバーの外に出ない。
+モデルは同じサーバー内の推論サーバー（vLLM。Ollama にも戻せる）の Anthropic 互換API（/v1/messages）で動かすため、ソースコードはサーバーの外に出ない。
 doc_graph からは `ainvoke(messages) -> AIMessage` を持つチャットモデルとして扱える。
 呼び出しのたびに新しいセッションで起動する（`--resume` はしない）。再生成で会話が伸び続けて
 コンテキストを超えるのを防ぐため、再生成に必要な情報（直前の出力と問題点）は doc_graph が依頼文に入れて渡す。
@@ -32,7 +32,7 @@ class ClaudeCodeLLM:
         command: list[str],
         *,
         model: str,
-        ollama_base_url: str,
+        llm_base_url: str,
         cwd: Path,
         add_dirs: list[Path],
         max_turns: int,
@@ -41,7 +41,7 @@ class ClaudeCodeLLM:
     ):
         self.command = command
         self.model = model
-        self.ollama_base_url = ollama_base_url
+        self.llm_base_url = llm_base_url
         self.cwd = cwd
         self.add_dirs = add_dirs
         self.max_turns = max_turns
@@ -51,8 +51,9 @@ class ClaudeCodeLLM:
     def _env(self) -> dict[str, str]:
         env = os.environ.copy()
         env.update({
-            "ANTHROPIC_BASE_URL": self.ollama_base_url,
-            "ANTHROPIC_AUTH_TOKEN": "ollama",  # 必須だがOllamaは値を見ない
+            "ANTHROPIC_BASE_URL": self.llm_base_url,
+            # Claude Code の起動に必須だが、--api-key なしの vLLM・Ollama は値を見ない
+            "ANTHROPIC_AUTH_TOKEN": "local",
             "ANTHROPIC_API_KEY": "",
             # Claude Code は補助処理に別モデル(haiku等)を使うため、すべてローカルモデルに向ける
             "ANTHROPIC_DEFAULT_OPUS_MODEL": self.model,
@@ -133,7 +134,7 @@ class ClaudeCodeLLM:
                 "num_turns": data.get("num_turns"),
                 "output_tokens": usage.get("output_tokens"),
                 # コンテキストの大きさを見るための入力側。プロンプトキャッシュ分は input_tokens に含まれない
-                # ため別々に残す。Ollama が返さない項目は None のまま（計測できないだけで失敗にはしない）
+                # ため別々に残す。推論サーバーが返さない項目は None のまま（計測できないだけで失敗にはしない）
                 "input_tokens": usage.get("input_tokens"),
                 "cache_read_input_tokens": usage.get("cache_read_input_tokens"),
                 "cache_creation_input_tokens": usage.get("cache_creation_input_tokens"),
@@ -148,7 +149,7 @@ def build_claude_code(settings: Settings, repo: Path, skill_dir: Path) -> Claude
     return ClaudeCodeLLM(
         command,
         model=settings.model,
-        ollama_base_url=settings.ollama_base_url,
+        llm_base_url=settings.llm_base_url,
         cwd=repo,
         add_dirs=[skill_dir],
         max_turns=settings.claude_max_turns,

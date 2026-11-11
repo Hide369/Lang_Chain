@@ -11,7 +11,7 @@ REPO_ROOT = Path(config.__file__).resolve().parent.parent
 @pytest.fixture(autouse=True)
 def clear_envs(monkeypatch):
     # 実行環境の .env や環境変数に左右されないようにする
-    for name in ("TARGETS_CONFIG", "CLAUDE_SKILL_PATH"):
+    for name in ("TARGETS_CONFIG", "CLAUDE_SKILL_PATH", "LLM_BASE_URL", "OLLAMA_BASE_URL"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -23,6 +23,19 @@ def test_design_skill_path_can_still_be_overridden(monkeypatch, tmp_path):
     monkeypatch.setenv("CLAUDE_SKILL_PATH", str(tmp_path / "SKILL.md"))
 
     assert load_settings().claude_skill_path == tmp_path / "SKILL.md"
+
+
+def test_llm_base_url_defaults_to_local_vllm():
+    assert load_settings().llm_base_url == "http://127.0.0.1:8000"
+
+
+def test_llm_base_url_falls_back_to_ollama_setting_then_prefers_llm_base_url(monkeypatch):
+    # Ollama に戻すとき、控えておいた古い .env（OLLAMA_BASE_URL だけ）をそのまま使えるようにする
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+    assert load_settings().llm_base_url == "http://127.0.0.1:11434"
+
+    monkeypatch.setenv("LLM_BASE_URL", "http://127.0.0.1:8000")
+    assert load_settings().llm_base_url == "http://127.0.0.1:8000"
 
 
 def test_targets_config_prefers_env_then_local_file_then_example(monkeypatch, tmp_path):

@@ -1,6 +1,5 @@
 langgraph==1.2.19
 langchain-core==1.7.3
-ollama==0.6.3
 httpx==0.28.1
 python-dotenv==1.2.4
 

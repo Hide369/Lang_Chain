@@ -4,6 +4,7 @@ GB10 上で vLLM を起動するときは、確保メモリ量を明示的に絞
 
 - 対象環境: GB10（CPU と GPU が 128GB のユニファイドメモリを共有）、vLLM 0.15.0 以上
 - モデル: Qwen3-Coder-Next の FP8 版（`Qwen/Qwen3-Coder-Next-FP8`）。Ollama で使っている `qwen3-coder-next` と同じモデルで、コンテキスト長も同じ 256K（262144）にする。BF16 版は重みだけで約160GBあり GB10 に載らないため、FP8 版を使う
+- モデル名: `--served-model-name claude-sonnet-4-5` で別名を付けて提供する。アプリの `.env` の `LLM_MODEL` もこの別名にする（Claude Code が `--model` と補助モデルにこの名前を使う）
 - 枯渇の主な原因: vLLM の既定 `--gpu-memory-utilization 0.9` がメモリの約9割を起動時に予約するため、OS や他プロセス（Ollama など）の分が残らない
 - もう一つの原因: 長い `max-model-len` と多い同時処理数が、KV キャッシュ用に大量のメモリを予約する
 
@@ -18,7 +19,7 @@ GB10 上で vLLM を起動するときは、確保メモリ量を明示的に絞
 3. 手順1: Ollama を止める（アンインストールはしない）
 4. 手順1.5: vLLM を導入する（初回のみ）
 5. 手順2〜4: キャッシュを解放し、vLLM を起動して動作を確認する
-6. 手順5: アプリ（Claude Code ヘッドレス）の接続先とモデル名を vLLM に合わせる
+6. 手順5: アプリ（Claude Code ヘッドレス）の接続先とモデル名を vLLM に合わせ、アプリを vLLM 対応版に入れ替える（`.env`・systemd のユニット）
 7. Qwen3-Coder-Next が動かなければ「[gpt-oss-120b に切り替える手順](#gpt-oss-120b-に切り替える手順qwen3-coder-next-が失敗したとき)」で vLLM のままモデルを替える
 8. それでも失敗したら「[Ollama に戻す手順](#ollama-に戻す手順いつでも実行可)」で元に戻す（どの段階からでも実行できる）
 9. vLLM をもう使わないなら「[vLLM を削除する手順](#vllm-を削除する手順やめる場合)」で片付ける
@@ -161,7 +162,7 @@ docker run -d --name vllm --gpus all --network host --ipc=host \
   -v ~/.cache/huggingface:/root/.cache/huggingface \
   nvcr.io/nvidia/vllm:<タグ> \
   vllm serve Qwen/Qwen3-Coder-Next-FP8 \
-    --served-model-name qwen3-coder-next \
+    --served-model-name claude-sonnet-4-5 \
     --host 0.0.0.0 --port 8000 \
     --gpu-memory-utilization 0.8 \
     --max-model-len 262144 \
@@ -200,13 +201,13 @@ Qwen3-Coder-Next FP8 は重みだけで約85GBあるため、`--gpu-memory-utili
 | `--max-model-len` | 262144 | 262144 | Ollama の `OLLAMA_CONTEXT_LENGTH`・`.env` の `LLM_NUM_CTX` と同じ値にする |
 | `--max-num-seqs` | 256前後 | 2 | 同時処理数。`.env` の `LLM_CONCURRENCY` と揃える |
 | `--kv-cache-dtype` | auto | fp8 | KV キャッシュをほぼ半減。256K を載せるために使う |
-| `--served-model-name` | モデルのリポジトリ名 | qwen3-coder-next | API で指定するモデル名。`.env` の `LLM_MODEL` と揃える |
+| `--served-model-name` | モデルのリポジトリ名 | claude-sonnet-4-5 | API で指定するモデル名（別名）。`.env` の `LLM_MODEL` と揃える |
 | `--enable-auto-tool-choice` `--tool-call-parser` | 無効 | 有効・`qwen3_coder` | Claude Code などのツール呼び出しを解釈する |
 | `--enforce-eager` | 無効 | 必要時のみ | CUDA グラフ分のメモリを節約（速度は低下） |
 
 ```bash
 vllm serve Qwen/Qwen3-Coder-Next-FP8 \
-  --served-model-name qwen3-coder-next \
+  --served-model-name claude-sonnet-4-5 \
   --host 0.0.0.0 --port 8000 \
   --gpu-memory-utilization 0.8 \
   --max-model-len 262144 \
@@ -274,19 +275,22 @@ docker run --rm -it \
 ログに起動完了が出たら、API を叩いて応答とメモリ残量を確認する。
 
 ```bash
-# モデル一覧（qwen3-coder-next が出ること）
+# モデル一覧（claude-sonnet-4-5 が出ること）
 curl http://localhost:8000/v1/models
 
 # 推論テスト
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"qwen3-coder-next","messages":[{"role":"user","content":"こんにちは"}],"max_tokens":64}'
+  -d '{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"こんにちは"}],"max_tokens":64}'
+
+# Claude Code が使う Anthropic 互換API（/v1/messages）の応答テスト
+curl http://localhost:8000/v1/messages   -H "Content-Type: application/json" -H "x-api-key: local" -H "anthropic-version: 2023-06-01"   -d '{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"こんにちは"}],"max_tokens":64}'
 
 # 推論中にもう一つの端末でメモリを監視
 watch -n 2 free -h
 ```
 
-- [ ] 応答が返る
+- [ ] `/v1/chat/completions` と `/v1/messages` の両方で応答が返る（`/v1/messages` が 404 なら vLLM が古い。新しいタグを使う）
 - [ ] 推論中も `available` が 10GB 以上残っている（OS の余裕）
 - [ ] ログに `KV cache` の確保量と最大同時処理数が出ている（`grep -i "kv cache" ~/vllm.log`）。262144 トークンが収まっていること
 
@@ -314,16 +318,19 @@ docker run -d --name vllm --gpus all --network host --ipc=host \
     --enable-auto-tool-choice --tool-call-parser qwen3_coder
 ```
 
-アプリの `.env` を vLLM に向ける。`OLLAMA_BASE_URL` は変数名が Ollama のままだが、`claude` 起動時の `ANTHROPIC_BASE_URL` に使われるので vLLM のポートに変える。末尾に `/v1` は付けない（Claude Code が `/v1/messages` を付ける）。
+アプリの `.env` を vLLM に向ける。接続先は `LLM_BASE_URL` に書く（`claude` 起動時の `ANTHROPIC_BASE_URL` と、実行前の事前チェックに使われる）。末尾に `/v1` は付けない（Claude Code が `/v1/messages` を付ける）。`LLM_MODEL` は `--served-model-name` の先頭の名前にする。
 
 ```bash
 # /opt/Lang_Chain/.env
-OLLAMA_BASE_URL=http://127.0.0.1:8000
+LLM_BASE_URL=http://127.0.0.1:8000
 LLM_MODEL=claude-sonnet-4-5
 ```
 
+- 以前の版のアプリは `OLLAMA_BASE_URL` しか読まない。この版でも `LLM_BASE_URL` がなければ `OLLAMA_BASE_URL` を使うが、vLLM では `LLM_BASE_URL` を書き、`OLLAMA_BASE_URL` の行は消す
+- 以前の版のアプリは、実行前の事前チェックで Ollama 固有の API を呼ぶため、vLLM では必ず失敗する。下の「アプリを vLLM 対応版に入れ替える」を行う
+
 - アプリは `ANTHROPIC_DEFAULT_OPUS_MODEL`・`SONNET`・`HAIKU` をすべて `LLM_MODEL` にするので、別名は1つあれば足りる。補助処理（haiku 系）も同じ名前で vLLM に届く
-- `ANTHROPIC_AUTH_TOKEN=ollama` はそのままでよい。vLLM を `--api-key` なしで起動していれば値は見られない
+- アプリは `ANTHROPIC_AUTH_TOKEN=local` を渡す（以前の版は `ollama`）。vLLM を `--api-key` なしで起動していれば値は見られない
 - `/v1/models` の一覧と応答の `model` 欄には先頭の名前（`claude-sonnet-4-5`）が出る
 - gpt-oss-120b で動かす場合も同じ。`--served-model-name claude-sonnet-4-5 gpt-oss-120b` とし、`.env` の `LLM_NUM_CTX=131072` は「gpt-oss-120b に切り替える手順」のとおりにする
 - 運用メモの systemd 化をする場合は、`ExecStart` の `--served-model-name` も同じにする
@@ -384,12 +391,59 @@ model_list:
       api_base: http://gb10:8000/v1
 ```
 
-- `.env` の `OLLAMA_BASE_URL` は Proxy の URL に、`LLM_MODEL` は `model_name` の値にする
+- `.env` の `LLM_BASE_URL` は Proxy の URL に、`LLM_MODEL` は `model_name` の値にする（事前チェックは Proxy の `/v1/models` に `model_name` が出ることを確かめる）
 - 経由する段が1つ増えるので、まず案1で動くことを確かめてから移すとよい
 
 ### 案3: Claude Code のモデル別名だけで済ませる（要検証）
 
 `--model sonnet` と別名で指定し、`ANTHROPIC_DEFAULT_SONNET_MODEL` などに vLLM 側の名前（`qwen3-coder-next`）を入れる方法。vLLM 側は変えずに済む。ただし、アプリは `--model` と `ANTHROPIC_DEFAULT_*_MODEL` に同じ `LLM_MODEL` を渡すため、アプリの修正が要る。ヘッドレスモードのモデル名の確認をこれで通れるかも、使う Claude Code のバージョンで試してから採用する。
+
+### アプリを vLLM 対応版に入れ替える（Web 画面・夜間バッチ）
+
+上の確認が済んだら、アプリ自体を vLLM 対応版に入れ替える。事前確認・戻し方を含む詳しい設置手順は [migration_vllm_app.md](migration_vllm_app.md) を参照（ここはその要約）。アプリは推論サーバーを OpenAI 互換の `/v1/models` で事前チェックし、Claude Code から Anthropic 互換の `/v1/messages` を呼ぶ（どちらも vLLM・Ollama の両方にある）。
+
+```bash
+cd /opt/Lang_Chain
+
+# 1. アプリを vLLM 対応版に更新（Ollama 専用の事前チェックをやめた版。ollama パッケージは不要になった）
+git pull
+.venv/bin/pip install -r requirements.txt
+
+# 2. .env を vLLM 向けに変える（OLLAMA_BASE_URL の行は消す。残っていても LLM_BASE_URL が優先される）
+#    LLM_BASE_URL=http://127.0.0.1:8000
+#    LLM_MODEL=claude-sonnet-4-5          # --served-model-name と同じ
+#    LLM_NUM_CTX=262144                   # --max-model-len と同じ
+#    LLM_CONCURRENCY=2                    # --max-num-seqs と同じ
+nano .env
+
+# 3. systemd のユニットを入れ直す（ollama.service への依存を外し、reload に対応した版）
+#    設置済みのユニットは古いままなので、User= を合わせてコピーし直す
+WEB_USER=$(systemctl show -p User --value godoc-web.service)
+sudo cp deploy/systemd/godoc-web.service /etc/systemd/system/
+sudo sed -i "s/REPLACE_WITH_USER/$WEB_USER/" /etc/systemd/system/godoc-web.service
+#    夜間タイマーを使っている場合だけ（GODOC_REPO などを残すため、ollama.service への依存だけを消す）
+sudo sed -i -E '/^(Wants|After)=/ s/ ?ollama\.service//' /etc/systemd/system/godoc-nightly.service
+sudo systemctl daemon-reload
+
+# 4. Web 画面を起動し直す（コードを更新したので、今回は reload ではなく restart）
+sudo systemctl restart godoc-web
+systemctl status godoc-web            # active (running) ならよい
+
+# 5. 夜間バッチを再開（止めていた場合）
+sudo systemctl start godoc-nightly.timer
+```
+
+- [ ] `systemctl show godoc-web -p Wants -p After` に `ollama.service` が出ない
+- [ ] `systemctl show godoc-web -p ExecReload` に `kill -HUP` が出る
+- [ ] Web 画面から1ファイルだけ設計書を生成し、成功する（`モデル 'claude-sonnet-4-5' が推論サーバーにありません` と出たら `LLM_MODEL` と `--served-model-name` を揃える）
+
+以後、`.env` の `LLM_*`・`CLAUDE_*` などだけを変えたときは `sudo systemctl reload godoc-web` で読み直せる（実行中のバッチは止めず、次の実行から反映）。`WEB_*` を変えたとき・コードを更新したときは `restart` する。
+
+#### `systemctl reload godoc-web` が失敗していた理由
+
+- 旧版のユニットには `ExecReload=` がなく、`Job type reload is not applicable for unit godoc-web.service` で失敗していた（`.env` を読み直す仕組み自体がなかった）
+- 旧版のユニットは `Wants=`・`After=ollama.service` を持っていた。「運用メモ」の `vllm.service`（`Conflicts=ollama.service`）と同時に使うと、godoc-web の起動・再起動で ollama.service の起動が要求され、vLLM と衝突して失敗する（または vLLM が止まる）
+- アプリの事前チェックが Ollama 固有の API（`/api/show`）を呼んでいたため、vLLM では実行のたびに `モデル ... が見つかりません` で失敗していた
 
 ## トラブルシューティング
 
@@ -411,6 +465,9 @@ model_list:
 | VS Code（Claude Code）から使うと、サーバー側で reasoning parser のエラーが出る | Claude Code がシンキングを指定してリクエストしている | 手順5の「Claude Code のシンキングを止める」で、Claude Code 側のシンキングをオフにする |
 | `--reasoning-parser` を付けると、シンキングは表示されるがレスポンスが表示されない | Qwen3-Coder-Next はシンキングの区切りを出さないため、応答全体がシンキング扱いになる | `--reasoning-parser` を外して起動し直し、Claude Code 側のシンキングをオフにする |
 | ツール呼び出しを含む長い入力で `!!!!` が延々と出る | ツール呼び出しの解釈の不具合（報告例あり） | `--tool-call-parser qwen3_xml` に変えて起動し直す |
+| 実行がすぐ `推論サーバーに接続できません` で終わる | vLLM が止まっている、または `LLM_BASE_URL` が違う | `curl http://127.0.0.1:8000/v1/models` で確認し、`.env` の `LLM_BASE_URL` を直して `sudo systemctl reload godoc-web` |
+| 実行がすぐ `モデル 'xxx' が推論サーバーにありません` で終わる | `LLM_MODEL` と `--served-model-name` が違う | エラーに出る「提供中」の名前に `LLM_MODEL` を揃えて `sudo systemctl reload godoc-web` |
+| `.env` を直したのに古い設定で動く | Web 画面が起動時の `.env` のまま | `sudo systemctl reload godoc-web`（行を消した場合は `restart`。reload は値の上書きだけで、消した行は残る） |
 
 上の対処をすべて試しても Qwen3-Coder-Next が安定しない場合は、次の「gpt-oss-120b に切り替える手順」に進む。
 
@@ -421,7 +478,7 @@ model_list:
 gpt-oss-120b のコンテキスト長は最大 131072（128K）で、256K にはできない。アプリの `.env` を次のように変える（変更前の `.env` は「準備」で `~/ollama-backup/env.bak` に控えてある）。`LLM_NUM_CTX` を下げると、大きなファイルは事前チェックで `too_large` として対象外になる。
 
 ```bash
-# /opt/Lang_Chain/.env
+# /opt/Lang_Chain/.env（変えたら sudo systemctl reload godoc-web）
 LLM_MODEL=gpt-oss-120b
 LLM_NUM_CTX=131072
 ```
@@ -476,7 +533,7 @@ curl http://localhost:8000/v1/chat/completions \
 
 - メモリが足りない場合は、手順3と同じ順（`--enforce-eager` を追加 → `--max-model-len` を下げる）で調整する。`--gpu-memory-utilization` は 0.6 まで下げられる
 - gpt-oss-120b でのツール呼び出しは `tool_choice="auto"` だけに対応している
-- Qwen3-Coder-Next に戻すときは、`docker rm -f vllm` の後に手順1.5の `docker run` で起動し直し、`.env` の `LLM_MODEL`・`LLM_NUM_CTX` を戻す
+- Qwen3-Coder-Next に戻すときは、`docker rm -f vllm` の後に手順1.5の `docker run` で起動し直し、`.env` の `LLM_MODEL`（`claude-sonnet-4-5`）・`LLM_NUM_CTX` を戻して `sudo systemctl reload godoc-web` する
 - gpt-oss-120b でも動かない場合は、次の「Ollama に戻す手順」で元に戻す
 - 参照: [vLLM の gpt-oss-120b レシピ](https://recipes.vllm.ai/openai/gpt-oss-120b)
 
@@ -503,7 +560,8 @@ systemctl show ollama -p Environment | diff - ~/ollama-backup/ollama-env.txt
 ollama list | diff - ~/ollama-backup/ollama-list.txt
 curl http://127.0.0.1:11434/api/tags
 
-# 5. アプリの .env を変えていた場合だけ戻して、Web画面を再起動
+# 5. アプリの .env を戻して、Web画面を再起動（LLM_BASE_URL の行が消えるので reload ではなく restart。
+#    控えた .env の OLLAMA_BASE_URL・LLM_MODEL（Modelfile で付けた Claude 名）がそのまま使われる）
 cp ~/ollama-backup/env.bak /opt/Lang_Chain/.env
 sudo systemctl restart godoc-web
 
@@ -592,14 +650,14 @@ sudo systemctl disable --now ollama
 ```ini
 # /etc/systemd/system/vllm.service
 [Unit]
-Description=vLLM Qwen3-Coder-Next
+Description=vLLM Qwen3-Coder-Next (served as claude-sonnet-4-5)
 After=network.target
 Conflicts=ollama.service
 
 [Service]
 User=<ユーザー名>
 ExecStartPre=+/bin/sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'
-ExecStart=/path/to/venv/bin/vllm serve Qwen/Qwen3-Coder-Next-FP8 --served-model-name qwen3-coder-next --host 0.0.0.0 --port 8000 --gpu-memory-utilization 0.8 --max-model-len 262144 --max-num-seqs 2 --kv-cache-dtype fp8 --enable-auto-tool-choice --tool-call-parser qwen3_coder
+ExecStart=/path/to/venv/bin/vllm serve Qwen/Qwen3-Coder-Next-FP8 --served-model-name claude-sonnet-4-5 --host 0.0.0.0 --port 8000 --gpu-memory-utilization 0.8 --max-model-len 262144 --max-num-seqs 2 --kv-cache-dtype fp8 --enable-auto-tool-choice --tool-call-parser qwen3_coder
 Restart=on-failure
 
 [Install]

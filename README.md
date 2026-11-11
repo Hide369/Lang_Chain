@@ -4,12 +4,12 @@ Goソースファイルから詳細設計書(Markdown)を一括生成するLangG
 GB10サーバー上で動かし、クライアント PC のブラウザ（Web 画面）か、GB10 の端末から起動する（GB10 へは SSH で接続できない前提）。
 
 設計書は、サーバー上の **Claude Code（`claude -p`）がエージェントとして**、既存の **SKILL.md をそのまま使って**書く。
-モデルは Ollama の Anthropic 互換API経由で qwen3-coder-next を使うため、ソースコードはサーバーの外に出ない。
+モデルは同じサーバー内の vLLM の Anthropic 互換API（`/v1/messages`）経由で Qwen3-Coder-Next（別名 `claude-sonnet-4-5` で提供）を使うため、ソースコードはサーバーの外に出ない（Ollama に戻すこともできる）。
 LangGraph は、その外側で並列制御・差分スキップ・検証・計測を受け持つ。
 
 同じ仕組みで、**ソースファイルにコメントを追記するスキル**も一括で実行できる（`CLAUDE_COMMENT_SKILL_PATH` を設定した場合。[コメント追記](#コメント追記)を参照）。
 
-runner は常駐サービスではなく、起動すると対象ファイルを処理して終了する**バッチ**である（常駐するのは Ollama だけ）。
+runner は常駐サービスではなく、起動すると対象ファイルを処理して終了する**バッチ**である（常駐するのは推論サーバー（vLLM）と Web 画面だけ）。
 必要なときに起動するか、[定期実行（systemd タイマー）](#定期実行systemd-タイマー) で毎晩自動実行する。
 
 ## 設計方針（方式A：1ファイル = 1セッション）
@@ -37,7 +37,7 @@ generate の中身（ファイルごと）:
   claude -p "<対象ファイル>の詳細設計書を作成"
     ├─ システムプロンプト: SKILL.md の全文 + バッチ用ルール
     ├─ ツール: Read / Glob / Grep のみ（作業ディレクトリ = --repo）
-    └─ モデル: Ollama(qwen3-coder-next)
+    └─ モデル: vLLM(Qwen3-Coder-Next、別名 claude-sonnet-4-5)
 ```
 
 | ファイル | 役割 |
@@ -47,12 +47,12 @@ generate の中身（ファイルごと）:
 | [godoc_agent/skill_registry.py](godoc_agent/skill_registry.py) | 登録済みのスキル（組み込みの設計書・コメント追記と、skills/registry.json に登録した追加のスキル）の一覧 |
 | [godoc_agent/runner.py](godoc_agent/runner.py) | バッチ実行、並列数制御、差分スキップ、計測ログ |
 | [godoc_agent/sessions.py](godoc_agent/sessions.py) | 同時に動くセッション（最大10）の枠の割り当てと、枠ごとの状況の記録（Web 画面のセッション欄が表示する） |
-| [godoc_agent/claude_code.py](godoc_agent/claude_code.py) | `claude -p` の起動（呼び出しごとに新しいセッション）、Ollama への接続設定 |
+| [godoc_agent/claude_code.py](godoc_agent/claude_code.py) | `claude -p` の起動（呼び出しごとに新しいセッション）、推論サーバー（vLLM）への接続設定 |
 | [godoc_agent/prompts.py](godoc_agent/prompts.py) | SKILL.md の読み込みと、エージェントへの指示の組み立て |
 | [godoc_agent/targets.py](godoc_agent/targets.py) | 対象の設定ファイル（targets.toml）の読み込みと、対象ファイルの列挙 |
 | [godoc_agent/analyzers.py](godoc_agent/analyzers.py) | 言語名から解析処理を引く（[go_source.py](godoc_agent/go_source.py)・[csharp_source.py](godoc_agent/csharp_source.py)・[typescript_source.py](godoc_agent/typescript_source.py)：関数・型・公開識別子などの事実抽出。いずれも正規表現の簡易版） |
 | [godoc_agent/source_common.py](godoc_agent/source_common.py) | 言語に共通する字句の分割と、コメント以外の差分検出 |
-| [godoc_agent/preflight.py](godoc_agent/preflight.py) | 開始前の Ollama 接続・モデル存在チェック |
+| [godoc_agent/preflight.py](godoc_agent/preflight.py) | 開始前の推論サーバー接続・モデル存在チェック（OpenAI 互換の `/v1/models`。vLLM・Ollama の両方で動く） |
 
 起動から終了までの処理の流れ（検証・保存・終了コードなど）は [docs/workflow.md](docs/workflow.md) にまとめている。
 処理対象の言語・フォルダ・ファイル・除外を変える手順は [docs/target_files.md](docs/target_files.md) にまとめている。
@@ -62,22 +62,16 @@ generate の中身（ファイルごと）:
 チェックポイント廃止・再生成の見直し版（PR #21）への入れ替え手順は [docs/migration_drop_checkpointer.md](docs/migration_drop_checkpointer.md) にまとめている。
 Web 画面版（PR #23・#24）への入れ替え手順（夜間タイマーからの切り替え・GitLab の認証を含む）は [docs/migration_web_ui.md](docs/migration_web_ui.md) にまとめている。
 Ollama を止めて vLLM に切り替える手順（アカウント登録の要否・メモリ枯渇対策・Ollama に戻す手順・vLLM を削除する手順を含む）は [docs/vllm_migration.md](docs/vllm_migration.md) にまとめている。
+vLLM に切り替えた後、アプリ（Web 画面・夜間バッチ）を vLLM 対応版に入れ替える設置手順（`.env`・systemd のユニットの入れ直し・元に戻す方法）は [docs/migration_vllm_app.md](docs/migration_vllm_app.md) にまとめている。
 
 ## サーバー(GB10)へのセットアップ
 
 コマンドは GB10 の端末で実行する（SSH は使えないため、GB10 に直接ログインした端末を使う）。
 
 ```bash
-# 1. Ollama の設定（systemd）
-sudo systemctl edit ollama
-#   [Service]
-#   Environment="OLLAMA_CONTEXT_LENGTH=262144"
-#   Environment="OLLAMA_KEEP_ALIVE=-1"
-#   Environment="OLLAMA_NUM_PARALLEL=2"
-#   Environment="OLLAMA_MAX_LOADED_MODELS=1"
-#   Environment="OLLAMA_FLASH_ATTENTION=1"
-sudo systemctl daemon-reload && sudo systemctl restart ollama
-ollama list          # モデルのタグ名を確認
+# 1. 推論サーバー（vLLM）を起動する（手順は docs/vllm_migration.md）
+#    --served-model-name claude-sonnet-4-5 --max-model-len 262144 --max-num-seqs 2 で起動しておく
+curl http://127.0.0.1:8000/v1/models   # claude-sonnet-4-5 が出ること
 
 # 2. Claude Code をインストール
 curl -fsSL https://claude.ai/install.sh | bash
@@ -87,7 +81,7 @@ which claude         # tmux / nohup から起動する場合は、このフル�
 cd /opt/Lang_Chain
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env  # LLM_MODEL などを編集（LLM_NUM_CTX は 1. の OLLAMA_CONTEXT_LENGTH と同じ値にする）
+cp .env.example .env  # LLM_MODEL などを編集（LLM_MODEL は --served-model-name、LLM_NUM_CTX は --max-model-len と同じ値にする）
 
 # 4. 既存のスキルをサーバーに置く（参照ファイルがあればフォルダごと）
 #    Web 画面を使う場合は、ここでは置かずに、画面の「スキル」タブからクライアント PC のフォルダを選んで登録する（docs/web_ui.md）
@@ -98,13 +92,13 @@ cp -r <持ってきたフォルダ>/<コメント追記スキル名> /opt/Lang_C
 #    コメント追記スキルは、置いた SKILL.md のパスを .env に書く
 #      CLAUDE_COMMENT_SKILL_PATH=/opt/Lang_Chain/skills/<コメント追記スキル名>/SKILL.md
 
-# 5. テスト（Ollama・Claude Code 不要）。最後に「N passed」とだけ表示されれば成功
+# 5. テスト（推論サーバー・Claude Code 不要）。最後に「N passed」とだけ表示されれば成功
 cd /opt/Lang_Chain && .venv/bin/python -m pytest
 ```
 
 テストは `/opt/Lang_Chain`（`pytest.ini` のある場所）で、仮想環境の Python から実行する。上の形なら、ターミナルを開き直して `activate` していなくても動く。
 
-Ollama の接続先（`ANTHROPIC_BASE_URL` など）は runner が `claude` の起動時に設定するため、シェルに設定する必要はない。
+推論サーバーの接続先（`ANTHROPIC_BASE_URL` など。`.env` の `LLM_BASE_URL` から作る）は runner が `claude` の起動時に設定するため、シェルに設定する必要はない。
 テレメトリなどモデル以外への通信も `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` で止めている。
 
 ### SKILL.md の扱い
@@ -245,7 +239,7 @@ GB10 上で Web 画面を常駐させると、クライアント PC のブラウ
 ```
 クライアント PC                                       サーバー(GB10)
   Goソース ──(git push)──> GitLab ──(git pull / HTTPS)──>  /srv/repos/myapp      ← --repo で読む
-  ブラウザ ──(Web 画面 http://<GB10>:4000)────────────>  runner ── Claude Code ── Ollama
+  ブラウザ ──(Web 画面 http://<GB10>:4000)────────────>  runner ── Claude Code ── vLLM
                                        GB10 の端末からコマンドでも起動できる（tmux / nohup で切り離す）
   設計書 <──(Web 画面のダウンロード / NAS / git)───────  /opt/Lang_Chain/out   ← --out に書く
 ```
@@ -256,7 +250,7 @@ Pythonファイルを置くだけでは動かない。最初に1回だけ、次�
 
 | 初回だけの準備（詳細は「サーバー(GB10)へのセットアップ」） | sudo |
 |---|---|
-| Ollama の設定（コンテキスト長など）とモデルの確認 | 要 |
+| vLLM の起動（コンテキスト長・別名など）とモデルの確認 | 要 |
 | Claude Code のインストール | 不要 |
 | このリポジトリの clone、venv 作成、`pip install` | `/opt` 配下なら要 |
 | `.env` の作成（`CLAUDE_BIN` など） | 不要 |
@@ -274,12 +268,12 @@ Pythonファイルを置くだけでは動かない。最初に1回だけ、次�
 | 進捗・結果の確認 | ログ・実行履歴・セッション欄 | `tail -n 20 /opt/Lang_Chain/out/_runs/<run-id>.log` |
 | 設計書の取得 | 生成物の一覧から「ダウンロード」 | NAS へのコピー・git（「3. 設計書を取得する」） |
 | SKILL.md の更新 | 「スキル」タブで登録し直す（次の実行から反映される） | `skills/` 配下を上書きする |
-| このリポジトリの更新 | — | `cd /opt/Lang_Chain && git pull && .venv/bin/pip install -r requirements.txt` の後、`sudo systemctl restart godoc-web` |
+| このリポジトリの更新 | — | `cd /opt/Lang_Chain && git pull && .venv/bin/pip install -r requirements.txt` の後、`sudo systemctl restart godoc-web`（`.env` だけを変えたときは `sudo systemctl reload godoc-web`） |
 
 注意:
 
 - **sudo が必要な作業は GB10 の端末で行う**。Web 画面からはできない
-- 停電などでサーバーが停止した後の電源投入は、物理的な操作（またはリモート電源管理）が必要。起動すれば Ollama と Web 画面は自動で立ち上がり、定期実行も逃した分を起動後に実行する
+- 停電などでサーバーが停止した後の電源投入は、物理的な操作（またはリモート電源管理）が必要。起動すれば vLLM（systemd 化した場合）と Web 画面は自動で立ち上がり、定期実行も逃した分を起動後に実行する
 
 ### 1. Goリポジトリをサーバーに置く
 
@@ -335,14 +329,14 @@ tmux / nohup で起動していれば、**起動後は端末を閉じて GB10 �
    tail -n 5 /opt/Lang_Chain/out/_runs/nightly-20261102.log
    ```
 
-   `run_id=... 対象=N 件` の後に `[1/N] done ...` のような進捗行が出ていればよい。すぐに `エラー:` が出ている場合は、Ollama・Claude Code・`.env` の設定を見直す
+   `run_id=... 対象=N 件` の後に `[1/N] done ...` のような進捗行が出ていればよい。すぐに `エラー:` が出ている場合は、vLLM・Claude Code・`.env` の設定を見直す
 
 端末を閉じても、サーバー側の要因では処理が止まる。
 
 | 要因 | 対策 |
 |---|---|
 | GB10 のスリープ・自動サスペンド（Ubuntuデスクトップ版では既定で有効な場合がある） | `sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target` で無効にする |
-| サーバーの再起動、Ollama の停止 | 同じコマンドで再実行すれば、完了済みを飛ばして残りを処理する |
+| サーバーの再起動、vLLM の停止 | 同じコマンドで再実行すれば、完了済みを飛ばして残りを処理する |
 
 後で確認するときは、ログの末尾にサマリー（`対象: ... 件 / 経過時間: ...`）が出ていれば完了している。
 失敗した件があった場合や途中で止まっていた場合は、同じコマンドで再実行すると残りだけが（最初から）処理される。完了したら次の手順で設計書を取得する。
@@ -452,17 +446,17 @@ sudo systemctl disable --now godoc-nightly.timer    # 定期実行を止める
 
 サマリーには、入力トークン数（1回あたり）の最大値・平均値と、警告が出た件数も表示される（値が取れた実行だけで集計し、1回も取れなければ表示しない）。
 
-入力トークン数の警告は、Ollama が `OLLAMA_CONTEXT_LENGTH` を超えた分を黙って切り捨てる問題を後から見つけるためのもの。`LLM_NUM_CTX` は Ollama の `OLLAMA_CONTEXT_LENGTH` と**同じ値にする**（ずれると判定もずれる）。
+入力トークン数の警告は、コンテキスト上限に近い実行を後から見つけるためのもの（Ollama は `OLLAMA_CONTEXT_LENGTH` を超えた分を黙って切り捨て、vLLM は `--max-model-len` を超えるとリクエストごと失敗する）。`LLM_NUM_CTX` は vLLM の `--max-model-len`（Ollama なら `OLLAMA_CONTEXT_LENGTH`）と**同じ値にする**（ずれると判定もずれる）。
 
 確認事項（PoCで確認する）：
 
-- Ollama の Anthropic 互換APIが `usage.input_tokens` などを実際に返すか（返さなければ `null` になり、警告も出ない）
+- 推論サーバー（vLLM）の Anthropic 互換APIが `usage.input_tokens` などを実際に返すか（返さなければ `null` になり、警告も出ない）
 - Claude Code の `usage` が「最後の1ターンの値」か「その実行の全ターンの合計」か。合計の場合は実際のコンテキストより大きく出るため、`num_turns` と合わせて見る
 
 ## 既知の制約（技術的負債）
 
 - **事実抽出は正規表現による簡易版**。複雑な宣言を取りこぼす可能性がある。本番では `go/ast` を使う補助ツールに置き換える
-- **入力の切り捨てを検出できない**。Claude Code はコンテキストの大きさを知らないまま会話を伸ばし、Ollama は `OLLAMA_CONTEXT_LENGTH` を超えた分を黙って切り捨てる。大きすぎるファイルは「1トークン≒3文字」の概算で事前に `too_large` とし、ターン数は `CLAUDE_MAX_TURNS` で抑えている。実行後は入力トークン数が上限に近ければ `warnings` に残すが、切り捨てそのものを検出するわけではなく、`usage` が返らなければ警告も出ない
+- **入力の切り捨てを検出できない**。Claude Code はコンテキストの大きさを知らないまま会話を伸ばす（Ollama は超えた分を黙って切り捨て、vLLM はその実行が `error` になる）。大きすぎるファイルは「1トークン≒3文字」の概算で事前に `too_large` とし、ターン数は `CLAUDE_MAX_TURNS` で抑えている。実行後は入力トークン数が上限に近ければ `warnings` に残すが、切り捨てそのものを検出するわけではなく、`usage` が返らなければ警告も出ない
 - **再生成は新しいセッションで行う**。以前は同じセッションを `--resume` して指摘だけを送っていたが、試行のたびにツールで読んだ内容が積み上がりコンテキストを超えたため、毎回「最初の依頼＋直前の出力＋指摘」を送り直す形にした。代わりに、再生成では関連ファイルを読み直す分の時間がかかり、入力は直前の出力1つ分だけ初回より大きくなる
 - 安定性は、ローカルモデルが Claude Code のツールを正しく使えるかに左右される。同じ操作の繰り返しや途中終了は `error`（`error_max_turns` など）として記録される
 - 設計書の構成（見出し）は検証しない。SKILL.md どおりの構成になっているかは、PoCで出力を確認する
