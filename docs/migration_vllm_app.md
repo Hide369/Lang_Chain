@@ -10,7 +10,7 @@ vLLM 自体の導入・起動は [vllm_migration.md](vllm_migration.md) の手�
 | 変更 | 以前 | この版 |
 |---|---|---|
 | 推論サーバーの接続先 | `.env` の `OLLAMA_BASE_URL`（既定 `http://127.0.0.1:11434`） | `.env` の `LLM_BASE_URL`（既定 `http://127.0.0.1:8000`）。なければ `OLLAMA_BASE_URL` を使う |
-| モデル名 | `ollama list` のタグ名（`qwen3-coder-next`） | vLLM の `--served-model-name` の別名（`claude-sonnet-4-5`） |
+| モデル名 | Ollama の Modelfile で付けた Claude 名 | vLLM の `--served-model-name` の別名（`claude-sonnet-4-5`）。Claude Code のヘッドレスモードは Claude のモデル名しか受け付けないため |
 | 実行前の事前チェック | Ollama 固有の API（`/api/show`）。vLLM では必ず失敗した | OpenAI 互換の `/v1/models`。vLLM・Ollama の両方で動く |
 | systemd のユニット | `Wants=`・`After=ollama.service` を持っていた | 推論サーバーに依存しない（vLLM の `Conflicts=ollama.service` と衝突しない） |
 | `systemctl reload godoc-web` | 非対応（`Job type reload is not applicable` で失敗） | `.env` を読み直す。実行中のバッチは止めず、次の実行から反映する |
@@ -177,7 +177,7 @@ sudo systemctl start godoc-nightly.timer
 ### 7-1. アプリはこの版のまま、Ollama に戻す
 
 この版は Ollama でも動く。[vllm_migration.md の「Ollama に戻す手順」](vllm_migration.md#ollama-に戻す手順いつでも実行可)を行う。
-その中で控えておいた `.env`（`OLLAMA_BASE_URL`・`LLM_MODEL=qwen3-coder-next`）を戻し、`sudo systemctl restart godoc-web` する（`LLM_BASE_URL` の行が消えるので reload ではなく restart）。
+その中で控えておいた `.env`（`OLLAMA_BASE_URL`・`LLM_MODEL` は Modelfile で付けた Claude 名）を戻し、`sudo systemctl restart godoc-web` する（`LLM_BASE_URL` の行が消えるので reload ではなく restart）。
 
 ### 7-2. アプリを以前の版に戻す
 
