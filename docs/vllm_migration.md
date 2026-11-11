@@ -238,6 +238,20 @@ docker ps -a        # STATUS が Up なら動作中、Exited なら落ちてい�
 free -h             # used が増えていれば読み込み中
 ```
 
+ログが `Using FlashInfer attention backend` で止まって見える場合は、まだ重みの読み込み前の段階にいる。vLLM はこの後に重みのダウンロードと読み込みに入るが、`-d` で起動していると、その間ログには何も出ない。次の2つで、どちらの処理中かを切り分ける。
+
+```bash
+# 1. ダウンロード中か（数分おきに実行して増えているか）
+du -sh ~/.cache/huggingface/hub/models--Qwen--Qwen3-Coder-Next-FP8
+
+# 2. FlashInfer のカーネルをコンパイル中か（nvcc や ninja が出ていればコンパイル中）
+docker top vllm | grep -E "nvcc|ninja|cicc"
+```
+
+- 容量が増えている → ダウンロード中。約85GBになるまで待つ
+- nvcc などが動いている → GB10 向けに初回だけカーネルをコンパイルしている。数十分かかることがあるが、2回目以降は速い
+- どちらも変化がない → 止まっている。`docker rm -f vllm` で止め、手順1.5の「モデルを先にダウンロードする」で先にダウンロードする
+
 ログに起動完了が出たら、API を叩いて応答とメモリ残量を確認する。
 
 ```bash
@@ -340,6 +354,7 @@ model_list:
 
 | 症状 | 考えられる原因 | 対処 |
 | --- | --- | --- |
+| ログが `Using FlashInfer attention backend` から進まない | 重みのダウンロード中か、FlashInfer のカーネルを初回コンパイル中 | 手順4の切り分け（`du -sh` と `docker top vllm`）で確認する |
 | `docker run -d` の後、何も表示されず止まったように見える | `-d` でバックグラウンド起動しているため。初回はモデル（約85GB）のダウンロード中で、進捗も出ない | `docker logs -f vllm` で確認する。進捗を見たい場合は、手順1.5の「モデルを先にダウンロードする」で先にダウンロードする |
 | `curl http://localhost:8000/v1/models` が `Connection refused` | まだ読み込み・ウォームアップ中か、コンテナが落ちている | `docker ps -a` で Up か確認。Up なら `Application startup complete` が出るまで待つ。Exited なら `docker logs vllm` の末尾のエラーを見る |
 | `/v1/models` が `401 Unauthorized` | 起動時に `--api-key` を付けている | `-H "Authorization: Bearer <キー>"` を付けて呼ぶ |
