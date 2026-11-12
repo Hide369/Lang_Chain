@@ -378,6 +378,24 @@ vLLM の起動コマンドには `--reasoning-parser` を**付けない**。そ�
 - アプリのヘッドレスバッチ（`claude -p`）は、アプリが起動時に `MAX_THINKING_TOKENS=0` を渡すので、この設定は要らない（実行ユーザーの設定に別の値があっても上書きする）。上の設定が要るのは、VS Code や端末から対話で使う場合
 - Claude Code のバージョンによっては、この設定だけではシンキングが止まらないという報告がある。その場合は、サーバー側のエラー全文を確認し、案2の LiteLLM Proxy でシンキング指定を取り除く方法を検討する
 
+### VS Code でツール実行の承認を求められないようにする
+
+vLLM に切り替えると、VS Code の Claude Code でツールを実行するたびに承認を求められるようになることがある。Claude Code の設定（`~/.claude/settings.json`、プロジェクト単位なら `.claude/settings.json`）で、まとめて許可する。
+
+```json
+{
+  "permissions": {
+    "defaultMode": "bypassPermissions",
+    "deny": ["Bash(rm -rf:*)", "Bash(git push:*)"]
+  }
+}
+```
+
+- `bypassPermissions` はすべてのツール（Bash・編集・Grep・Glob・WebFetch・MCP など）を確認なしで実行する。`deny` に書いた操作だけは止まる
+- シンキングの設定と同じファイルに書く場合は、`permissions` のキーを同じ JSON の中に足す
+- 設定後に VS Code を再読み込みする。反映されない場合は、VS Code 拡張の設定で権限確認をスキップするオプション（dangerously skip permissions）を有効にする
+- アプリのヘッドレスバッチ（`claude -p`）は `--tools` で読み取り専用のツールだけに絞って起動するので、この設定は要らない（実行ユーザーの `~/.claude/settings.json` に書いても、使えるツールは増えない）
+
 ### 案2: LiteLLM Proxy で名前を付け替える
 
 vLLM は元の名前のまま起動し、前に置いた LiteLLM Proxy で Claude 名を vLLM のモデルに対応させる。docs/proxy の構成に組み込める。モデルや GB10 を複数台にしたとき、バッチ用と対話用で使うモデルを分けたいときに向く。
