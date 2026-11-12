@@ -393,8 +393,16 @@ vLLM に切り替えると、VS Code の Claude Code でツールを実行する
 
 - `bypassPermissions` はすべてのツール（Bash・編集・Grep・Glob・WebFetch・MCP など）を確認なしで実行する。`deny` に書いた操作だけは止まる
 - シンキングの設定と同じファイルに書く場合は、`permissions` のキーを同じ JSON の中に足す
-- 設定後に VS Code を再読み込みする。反映されない場合は、VS Code 拡張の設定で権限確認をスキップするオプション（dangerously skip permissions）を有効にする
 - アプリのヘッドレスバッチ（`claude -p`）は `--tools` で読み取り専用のツールだけに絞って起動するので、この設定は要らない（実行ユーザーの `~/.claude/settings.json` に書いても、使えるツールは増えない）
+
+VS Code 拡張では、上の設定だけでは bypass モードにならない。拡張側でも次の2つを設定し、VS Code を再読み込みしてから新しい会話で試す。
+
+1. **拡張の設定でトグルをオンにする（必須）**：VS Code の設定で「Claude Code」を検索し、**Allow dangerously skip permissions** をオンにする。オフのままだと、モード表示に Bypass permissions が出ず、`defaultMode` に `bypassPermissions` を書いていても Manual で始まる
+2. **開始モードを固定する**：VS Code のユーザー設定（`settings.json`）に次を足す。拡張は「この設定 → 前回モード表示で選んだモード → `~/.claude/settings.json` の `defaultMode`」の順に見るので、ここで指定するのが一番確実。入力欄の下のモード表示をクリックして Bypass permissions を選んでも切り替わる
+
+```json
+"claudeCode.initialPermissionMode": "bypassPermissions"
+```
 
 ### 案2: LiteLLM Proxy で名前を付け替える
 
