@@ -563,6 +563,8 @@ curl http://localhost:8000/v1/chat/completions \
 - gpt-oss-120b でも動かない場合は、次の「Ollama に戻す手順」で元に戻す
 - 参照: [vLLM の gpt-oss-120b レシピ](https://recipes.vllm.ai/openai/gpt-oss-120b)
 
+Gemma 4 31B に切り替える場合は [vllm_gemma4.md](vllm_gemma4.md) を参照（手順は同じく、モデルを先にダウンロードしておき起動引数を替えるだけ）。
+
 ## Ollama に戻す手順（いつでも実行可）
 
 vLLM の導入や起動に失敗したとき、または試用をやめるときは、次の手順で元に戻す。Ollama 本体・モデル・設定は残しているので、vLLM を止めて Ollama を起動するだけで戻る。OS が応答しない場合は、再起動してから実行する。

@@ -63,6 +63,7 @@ generate の中身（ファイルごと）:
 Web 画面版（PR #23・#24）への入れ替え手順（夜間タイマーからの切り替え・GitLab の認証を含む）は [docs/migration_web_ui.md](docs/migration_web_ui.md) にまとめている。
 Ollama を止めて vLLM に切り替える手順（アカウント登録の要否・メモリ枯渇対策・Ollama に戻す手順・vLLM を削除する手順を含む）は [docs/vllm_migration.md](docs/vllm_migration.md) にまとめている。
 vLLM に切り替えた後、アプリ（Web 画面・夜間バッチ）を vLLM 対応版に入れ替える設置手順（`.env`・systemd のユニットの入れ直し・元に戻す方法）は [docs/migration_vllm_app.md](docs/migration_vllm_app.md) にまとめている。
+vLLM のモデルを Qwen3-Coder-Next から Gemma 4 31B に切り替える手順（事前ダウンロード・Hugging Face にログインできない場合の入手先・元に戻す方法）は [docs/vllm_gemma4.md](docs/vllm_gemma4.md) にまとめている。
 
 ## サーバー(GB10)へのセットアップ
 
