@@ -8,8 +8,10 @@ from godoc_agent.skill_registry import (
     REWRITE,
     find_skill,
     list_skills,
+    read_labels,
     read_registry,
     registry_path,
+    validate_label,
     write_registry,
 )
 
@@ -53,3 +55,32 @@ def test_broken_registry_is_reported(tmp_path: Path, content: str):
     path.write_text(content, encoding="utf-8")
     with pytest.raises(ValueError, match="登録ファイルが壊れています"):
         read_registry(tmp_path)
+
+
+def test_display_name_is_used_as_label_and_kept_in_registry(tmp_path: Path):
+    write_registry(tmp_path, {"test-spec": DOCUMENT, "fmt": REWRITE}, {"test-spec": "テスト仕様書"})
+    assert read_labels(tmp_path) == {"test-spec": "テスト仕様書"}
+    # 種類の読み出しは表示名があっても変わらない
+    assert read_registry(tmp_path) == {"test-spec": DOCUMENT, "fmt": REWRITE}
+    spec, fmt = find_skill(tmp_path, "test-spec"), find_skill(tmp_path, "fmt")
+    assert (spec.label, spec.display_name, spec.skill_dir.name) == ("テスト仕様書", "テスト仕様書", "test-spec")
+    # 表示名がなければスキル名を表示する
+    assert fmt.label == "fmt"
+
+
+def test_registry_without_labels_still_reads(tmp_path: Path):
+    path = registry_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text('{"skills": {"fmt": {"type": "rewrite"}}}', encoding="utf-8")
+    assert read_labels(tmp_path) == {}
+    assert find_skill(tmp_path, "fmt").label == "fmt"
+
+
+@pytest.mark.parametrize("label, error", [("あ" * 41, "40 文字"), ("改\n行", "制御文字")])
+def test_invalid_display_name_is_rejected(label: str, error: str):
+    with pytest.raises(ValueError, match=error):
+        validate_label(label)
+
+
+def test_display_name_is_trimmed():
+    assert validate_label("  テスト仕様書 ") == "テスト仕様書"

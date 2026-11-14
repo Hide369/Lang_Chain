@@ -3,8 +3,9 @@
 組み込みのスキルは2つで、置き場所と出力先はこれまでどおり。
   doc     … 詳細設計書（文書）。CLAUDE_SKILL_PATH、未設定なら skills/design-doc-batch/SKILL.md。出力は --out 直下
   comment … コメント追記。CLAUDE_COMMENT_SKILL_PATH、未設定なら skills/comment-batch/SKILL.md。出力は --out/_commented
-それ以外のスキルは skills/registry.json に名前と出力の種類を登録し、skills/<名前>/SKILL.md に置く。
+それ以外のスキルは skills/registry.json に名前と出力の種類（と任意の表示名）を登録し、skills/<名前>/SKILL.md に置く。
 出力は --out/_<名前>/ の下（文書は <相対パス>.md、ソースは <相対パス>）。
+表示名は画面（実行・定期実行のプルダウンなど）に出す日本語などの名前で、フォルダ名や --tasks には使わない。
 """
 
 import json
@@ -26,6 +27,7 @@ OUTPUT_TYPES = (DOCUMENT, COMMENT_ONLY, REWRITE)
 OUTPUT_TYPE_LABELS = {DOCUMENT: "文書（Markdown）", COMMENT_ONLY: "コメントだけ変更したソース", REWRITE: "コードも変更したソース"}
 
 REGISTRY_FILE = "registry.json"
+MAX_LABEL_LENGTH = 40
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
 # 組み込みのスキル名・フォルダ名・出力先の予約名とは重ならないようにする
 _RESERVED = {DOC, COMMENT, DESIGN_SKILL_NAME, COMMENT_SKILL_NAME, "runs", "commented"}
@@ -38,6 +40,7 @@ class SkillDef:
     skill_path: Path  # SKILL.md
     out_subdir: str  # --out からの相対フォルダ（"" は --out 直下）
     builtin: bool
+    display_name: str = ""  # 追加のスキルの表示名（未設定なら空）
 
     @property
     def skill_dir(self) -> Path:
@@ -45,7 +48,8 @@ class SkillDef:
 
     @property
     def label(self) -> str:
-        return {DOC: "設計書", COMMENT: "コメント追記"}.get(self.name, self.name)
+        """画面に出す名前。組み込みは固定、追加のスキルは表示名（未設定ならスキル名）。"""
+        return {DOC: "設計書", COMMENT: "コメント追記"}.get(self.name) or self.display_name or self.name
 
     @property
     def registered(self) -> bool:
@@ -58,6 +62,18 @@ def validate_name(name: str) -> str:
     if name in _RESERVED:
         raise ValueError(f"スキル名 {name!r} は予約されているため使えません")
     return name
+
+
+def validate_label(label: str) -> str:
+    """表示名の前後の空白を除いて確かめる。空は「表示名なし」（スキル名をそのまま表示）。"""
+    if not isinstance(label, str):
+        raise ValueError("表示名は文字列で指定してください")
+    label = label.strip()
+    if len(label) > MAX_LABEL_LENGTH:
+        raise ValueError(f"表示名は {MAX_LABEL_LENGTH} 文字以内にしてください")
+    if any(not ch.isprintable() for ch in label):
+        raise ValueError("表示名に改行や制御文字は使えません")
+    return label
 
 
 def skills_root(app_dir: Path) -> Path:
@@ -87,19 +103,40 @@ def read_registry(app_dir: Path) -> dict[str, str]:
         raise ValueError(f"スキルの登録ファイルが壊れています: {path}: {e}") from e
 
 
-def write_registry(app_dir: Path, entries: dict[str, str]) -> None:
+def read_labels(app_dir: Path) -> dict[str, str]:
+    """追加のスキル名 → 表示名（表示名を登録したものだけ）。"""
+    path = registry_path(app_dir)
+    if not path.is_file():
+        return {}
+    read_registry(app_dir)  # 壊れていないことを先に確かめる
+    skills = json.loads(path.read_text(encoding="utf-8"))["skills"]
+    try:
+        labels = {name: validate_label(entry.get("label", "")) for name, entry in skills.items()}
+    except ValueError as e:
+        raise ValueError(f"スキルの登録ファイルが壊れています: {path}: {e}") from e
+    return {name: label for name, label in labels.items() if label}
+
+
+def write_registry(app_dir: Path, entries: dict[str, str], labels: dict[str, str] | None = None) -> None:
+    """entries（スキル名 → 出力の種類）を書く。labels（スキル名 → 表示名）は entries にある名前の分だけ残す。"""
+    labels = labels or {}
     path = registry_path(app_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = {"skills": {name: {"type": entries[name]} for name in sorted(entries)}}
+    data = {"skills": {}}
+    for name in sorted(entries):
+        entry = {"type": entries[name]}
+        if labels.get(name):
+            entry["label"] = labels[name]
+        data["skills"][name] = entry
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     tmp.replace(path)
 
 
-def custom_skill(app_dir: Path, name: str, output_type: str) -> SkillDef:
+def custom_skill(app_dir: Path, name: str, output_type: str, display_name: str = "") -> SkillDef:
     return SkillDef(
         name=name, output_type=output_type, skill_path=skills_root(app_dir) / name / "SKILL.md",
-        out_subdir=f"_{name}", builtin=False,
+        out_subdir=f"_{name}", builtin=False, display_name=display_name,
     )
 
 
@@ -110,7 +147,8 @@ def list_skills(app_dir: Path) -> list[SkillDef]:
         SkillDef(DOC, DOCUMENT, design_skill_path(app_dir), "", builtin=True),
         SkillDef(COMMENT, COMMENT_ONLY, comment, "_commented", builtin=True),
     ]
-    skills += [custom_skill(app_dir, name, t) for name, t in sorted(read_registry(app_dir).items())]
+    labels = read_labels(app_dir)
+    skills += [custom_skill(app_dir, name, t, labels.get(name, "")) for name, t in sorted(read_registry(app_dir).items())]
     return skills
 
 

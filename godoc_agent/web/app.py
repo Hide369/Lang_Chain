@@ -87,6 +87,13 @@ class SkillUpload(BaseModel):
     files: list[UploadedFile] = Field(min_length=1)
     # 追加のスキルの出力の種類（document / comment / rewrite）。新しく登録するときは必須
     type: str | None = None
+    # 追加のスキルの表示名（日本語可）。省略すると入れ替えでは前の表示名のまま、空文字なら消す
+    label: str | None = Field(default=None, max_length=200)
+
+
+class SkillLabel(BaseModel):
+    # 空文字なら表示名を消し、スキル名をそのまま表示する
+    label: str = Field(max_length=200)
 
 
 class UploadBegin(BaseModel):
@@ -519,7 +526,14 @@ def create_app(
         except (binascii.Error, ValueError) as e:
             raise HTTPException(400, "ファイルの内容が正しく送られていません") from e
         try:
-            return skills.install(name, files, body.type)
+            return skills.install(name, files, body.type, body.label)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+
+    @app.put("/api/skills/{name}/label", dependencies=[Depends(require_admin), Depends(require_idle)])
+    def set_skill_label(name: str, body: SkillLabel) -> dict:
+        try:
+            return skills.set_label(name, body.label)
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
 

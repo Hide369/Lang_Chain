@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from godoc_agent.runlock import run_lock
 from godoc_agent.sessions import SessionBoard, sessions_path
-from godoc_agent.skill_registry import COMMENT, DOC, read_registry
+from godoc_agent.skill_registry import COMMENT, DOC, read_labels, read_registry
 from godoc_agent.web.app import CSRF_HEADER, CSRF_VALUE, create_app
 from godoc_agent.web.auth import LoginThrottle, hash_password, verify_password
 from godoc_agent.web.jobs import JobManager
@@ -389,8 +389,8 @@ def test_replacing_skill_keeps_previous_one_for_restore(admin, skills):
     assert admin.get("/api/skills/doc/content").text == "# 設計書スキル\n"
 
 
-def upload_custom(client: TestClient, name: str, type_: str | None, text: str = "# 追加スキル\n"):
-    body = {"files": [{"path": "SKILL.md", "content_b64": b64(text)}], "type": type_}
+def upload_custom(client: TestClient, name: str, type_: str | None, text: str = "# 追加スキル\n", label: str | None = None):
+    body = {"files": [{"path": "SKILL.md", "content_b64": b64(text)}], "type": type_, "label": label}
     return client.put(f"/api/skills/{name}", json=body, headers=CSRF)
 
 
@@ -442,6 +442,54 @@ def test_invalid_custom_skill_is_rejected(admin, app_dir, name, type_, error):
     assert res.status_code == 400
     assert error in res.json()["detail"]
     assert read_registry(app_dir) == {}
+
+
+def task_labels(client: TestClient) -> dict[str, str]:
+    return {t["name"]: t["label"] for t in client.get("/api/config").json()["tasks"]}
+
+
+def test_custom_skill_display_name_is_shown_in_task_picker(admin, app_dir):
+    res = upload_custom(admin, "test-spec", "document", label=" テスト仕様書 ")
+    assert res.status_code == 200
+    assert (res.json()["label"], res.json()["display_name"]) == ("テスト仕様書", "テスト仕様書")
+    # フォルダ名はスキル名のまま、表示名は registry.json に残る
+    assert (app_dir / "skills" / "test-spec" / "SKILL.md").is_file()
+    assert read_labels(app_dir) == {"test-spec": "テスト仕様書"}
+    assert task_labels(admin) == {"doc": "設計書", "test-spec": "テスト仕様書"}
+
+    # 入れ替えで表示名を省略すると前の表示名のまま
+    assert upload_custom(admin, "test-spec", None, "# 新しい版\n").json()["label"] == "テスト仕様書"
+
+    # 表示名だけ変える・消す
+    res = admin.put("/api/skills/test-spec/label", json={"label": "単体テスト仕様"}, headers=CSRF)
+    assert res.status_code == 200
+    assert task_labels(admin)["test-spec"] == "単体テスト仕様"
+    assert admin.get("/api/skills/test-spec/content").text == "# 新しい版\n"
+    admin.put("/api/skills/test-spec/label", json={"label": ""}, headers=CSRF)
+    assert task_labels(admin)["test-spec"] == "test-spec"
+    assert read_labels(app_dir) == {}
+
+
+def test_display_name_is_removed_with_skill(admin, app_dir):
+    upload_custom(admin, "test-spec", "document", label="テスト仕様書")
+    upload_custom(admin, "fmt", "rewrite", label="整形")
+    admin.delete("/api/skills/test-spec", headers=CSRF)
+    assert read_labels(app_dir) == {"fmt": "整形"}
+
+
+@pytest.mark.parametrize("name", ["doc", "comment"])
+def test_builtin_skill_display_name_cannot_be_changed(admin, name):
+    assert admin.put(f"/api/skills/{name}/label", json={"label": "別名"}, headers=CSRF).status_code == 400
+    res = upload_custom(admin, name, None, label="別名")
+    assert res.status_code == 400
+    assert "表示名" in res.json()["detail"]
+
+
+def test_too_long_display_name_is_rejected(admin, app_dir):
+    res = upload_custom(admin, "test-spec", "document", label="あ" * 41)
+    assert res.status_code == 400
+    assert read_registry(app_dir) == {}
+    assert not (app_dir / "skills" / "test-spec").exists()
 
 
 def test_builtin_skill_type_cannot_be_changed(admin):
