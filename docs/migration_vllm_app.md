@@ -53,36 +53,36 @@ systemctl is-active godoc-nightly.service; pgrep -af godoc_agent.runner
 
 ```bash
 mkdir -p ~/godoc-backup
-cp /opt/Lang_Chain/.env ~/godoc-backup/env.before-vllm-app
+cp /opt/Batch_Exec/.env ~/godoc-backup/env.before-vllm-app
 sudo cp /etc/systemd/system/godoc-web.service ~/godoc-backup/
 sudo cp /etc/systemd/system/godoc-nightly.service ~/godoc-backup/ 2>/dev/null   # 夜間タイマーを設置していない場合は無視してよい
-git -C /opt/Lang_Chain rev-parse HEAD > ~/godoc-backup/commit.txt
+git -C /opt/Batch_Exec rev-parse HEAD > ~/godoc-backup/commit.txt
 ```
 
 ## 2. プログラムを更新する（`git pull`）
 
 ```bash
-cd /opt/Lang_Chain && git status --short   # ` M` の行があれば、先に git stash などで退避する
-cd /opt/Lang_Chain && git pull
+cd /opt/Batch_Exec && git status --short   # ` M` の行があれば、先に git stash などで退避する
+cd /opt/Batch_Exec && git pull
 ```
 
 `requirements.txt` からは `ollama` を削除しただけなので、`pip install` は不要。
 使わなくなったパッケージを消したい場合だけ、次を実行する（残っていても動作に影響はない）。
 
 ```bash
-/opt/Lang_Chain/.venv/bin/pip uninstall -y ollama
+/opt/Batch_Exec/.venv/bin/pip uninstall -y ollama
 ```
 
 テストを実行して、更新が正しく入ったことを確認する（vLLM・Claude Code は使わない）。
 
 ```bash
-cd /opt/Lang_Chain && .venv/bin/python -m pytest -q   # 最後に「N passed」と出ればよい
+cd /opt/Batch_Exec && .venv/bin/python -m pytest -q   # 最後に「N passed」と出ればよい
 ```
 
 ## 3. `.env` を vLLM 向けに変える
 
 ```bash
-nano /opt/Lang_Chain/.env
+nano /opt/Batch_Exec/.env
 ```
 
 次の3つを、vLLM の起動オプションと同じ値にする。`OLLAMA_BASE_URL`・`LLM_CONCURRENCY` の行は消す（どちらももう読まない）。
@@ -95,7 +95,7 @@ LLM_NUM_CTX=262144                   # vLLM の --max-model-len
 
 ```bash
 # 確認（3行が上の値で出て、OLLAMA_BASE_URL・LLM_CONCURRENCY が出なければよい）
-grep -E '^(LLM_BASE_URL|LLM_MODEL|LLM_NUM_CTX|LLM_CONCURRENCY|OLLAMA_BASE_URL)=' /opt/Lang_Chain/.env
+grep -E '^(LLM_BASE_URL|LLM_MODEL|LLM_NUM_CTX|LLM_CONCURRENCY|OLLAMA_BASE_URL)=' /opt/Batch_Exec/.env
 ```
 
 ## 4. systemd のユニットを入れ直す
@@ -108,7 +108,7 @@ grep -E '^(LLM_BASE_URL|LLM_MODEL|LLM_NUM_CTX|LLM_CONCURRENCY|OLLAMA_BASE_URL)='
 
 ```bash
 WEB_USER=$(systemctl show -p User --value godoc-web.service); echo "$WEB_USER"   # 実行ユーザーが表示されること
-sudo cp /opt/Lang_Chain/deploy/systemd/godoc-web.service /etc/systemd/system/
+sudo cp /opt/Batch_Exec/deploy/systemd/godoc-web.service /etc/systemd/system/
 sudo sed -i "s/REPLACE_WITH_USER/$WEB_USER/" /etc/systemd/system/godoc-web.service
 ```
 
@@ -181,9 +181,9 @@ sudo systemctl start godoc-nightly.timer
 ### 7-2. アプリを以前の版に戻す
 
 ```bash
-cd /opt/Lang_Chain && git checkout "$(cat ~/godoc-backup/commit.txt)"
+cd /opt/Batch_Exec && git checkout "$(cat ~/godoc-backup/commit.txt)"
 .venv/bin/pip install -r requirements.txt                    # ollama パッケージを入れ直す
-cp ~/godoc-backup/env.before-vllm-app /opt/Lang_Chain/.env
+cp ~/godoc-backup/env.before-vllm-app /opt/Batch_Exec/.env
 sudo cp ~/godoc-backup/godoc-web.service /etc/systemd/system/
 sudo cp ~/godoc-backup/godoc-nightly.service /etc/systemd/system/ 2>/dev/null
 sudo systemctl daemon-reload && sudo systemctl restart godoc-web

@@ -115,7 +115,7 @@ exclude = ["**/bin/**", "**/obj/**", "**/*Tests.cs", "**/*.Designer.cs", "**/*.g
 
 1. **設定ファイルを作る**（初回だけ）
    ```bash
-   cd /opt/Lang_Chain && cp -n targets.example.toml targets.toml
+   cd /opt/Batch_Exec && cp -n targets.example.toml targets.toml
    ```
    `targets.toml` はコミットしないので、`git pull` で上書きされない。
 2. **`targets.toml` を編集する**
@@ -137,15 +137,15 @@ exclude = ["**/bin/**", "**/obj/**", "**/*Tests.cs", "**/*.Designer.cs", "**/*.g
 設計書スキルの置き場所は `skills/design-doc-batch/SKILL.md` に固定した（`.env` での指定は不要）。
 すべての言語で同じスキルを使うので、スキルには特定の言語に依存しない書き方をしておく。
 
-**以前の設定（`CLAUDE_SKILL_PATH=/opt/Lang_Chain/skills/go-design-doc/SKILL.md` など）から移行する手順**
+**以前の設定（`CLAUDE_SKILL_PATH=/opt/Batch_Exec/skills/go-design-doc/SKILL.md` など）から移行する手順**
 
 ```bash
 # 1. スキルのフォルダ名を design-doc-batch に変える（SKILL.md の name: も design-doc-batch に揃える）
-cd /opt/Lang_Chain/skills && mv go-design-doc design-doc-batch
+cd /opt/Batch_Exec/skills && mv go-design-doc design-doc-batch
 # 2. .env の CLAUDE_SKILL_PATH の行を削除する（残っていると、そちらのパスが使われる）
-cd /opt/Lang_Chain && sed -i '/^CLAUDE_SKILL_PATH=/d' .env
+cd /opt/Batch_Exec && sed -i '/^CLAUDE_SKILL_PATH=/d' .env
 # 3. 確認（パスが表示されればよい）
-ls /opt/Lang_Chain/skills/design-doc-batch/SKILL.md
+ls /opt/Batch_Exec/skills/design-doc-batch/SKILL.md
 ```
 
 `CLAUDE_SKILL_PATH` は、スキルを別の場所に置く場合のために残している。

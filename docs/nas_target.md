@@ -5,7 +5,7 @@
 ```
 NAS（nas01:/volume1/repos） ──LAN──> GB10 の /mnt/nas/repos にマウント
                                         └─ runner・Claude Code はここを普通のフォルダとして読む
-出力先は GB10 のローカルディスク（/opt/Lang_Chain/out）のまま
+出力先は GB10 のローカルディスク（/opt/Batch_Exec/out）のまま
 ```
 
 - runner と Claude Code はサーバー上で動き、ソースを**サーバーのフォルダパス**として読む。`\\nas01\repos` や `smb://...` を直接指定することはできず、クライアント PC で割り当てたネットワークドライブ（`Z:` など）もサーバーからは見えない。そのため、NAS を GB10 にマウントしてから、そのマウント先を対象フォルダに選ぶ
@@ -193,10 +193,10 @@ sudo -u <実行ユーザー> git -C /mnt/nas/repos/myapp pull --ff-only   # "Alr
 
 **7-1. 選べる範囲にマウント先を足す**
 
-`/opt/Lang_Chain/.env` の `WEB_BROWSE_ROOTS` に、マウント先を追加する。出力先の起点（ローカル）は残しておく。
+`/opt/Batch_Exec/.env` の `WEB_BROWSE_ROOTS` に、マウント先を追加する。出力先の起点（ローカル）は残しておく。
 
 ```
-WEB_BROWSE_ROOTS=/mnt/nas/repos,/opt/Lang_Chain/out
+WEB_BROWSE_ROOTS=/mnt/nas/repos,/opt/Batch_Exec/out
 ```
 
 ```bash
@@ -207,7 +207,7 @@ sudo systemctl restart godoc-web.service
 
 1. ブラウザで Web 画面を開き、管理者でログインする
 2. 「実行」タブの「フォルダ」で、**対象フォルダ**の「選択…」から `/mnt/nas/repos/<リポジトリ>` を選ぶ
-3. **出力先**は、ローカルの `/opt/Lang_Chain/out`（またはその下）のままにする
+3. **出力先**は、ローカルの `/opt/Batch_Exec/out`（またはその下）のままにする
 
 **7-3. 少ない件数で試す**
 
@@ -222,7 +222,7 @@ sudo systemctl restart godoc-web.service
 ```bash
 sudo -u <実行ユーザー> crontab -e
 # 毎朝 6:00 に、生成物（ログ・管理用ファイルを除く）を NAS へコピーする
-0 6 * * * rsync -a --exclude '_runs/' --exclude '.*' /opt/Lang_Chain/out/ /mnt/nas/docs/
+0 6 * * * rsync -a --exclude '_runs/' --exclude '.*' /opt/Batch_Exec/out/ /mnt/nas/docs/
 ```
 
 ## 9. 運用上の注意

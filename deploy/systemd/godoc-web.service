@@ -10,9 +10,9 @@ After=network-online.target
 Type=simple
 # 設置時に実行ユーザーへ置き換える（夜間バッチと同じユーザーにすると、出力先・スキルの権限がそろう）
 User=REPLACE_WITH_USER
-WorkingDirectory=/opt/Lang_Chain
-# 設定（WEB_* など）は /opt/Lang_Chain/.env から読む
-ExecStart=/opt/Lang_Chain/.venv/bin/python -m godoc_agent.web
+WorkingDirectory=/opt/Batch_Exec
+# 設定（WEB_* など）は /opt/Batch_Exec/.env から読む
+ExecStart=/opt/Batch_Exec/.venv/bin/python -m godoc_agent.web
 # `systemctl reload` で .env を読み直す（実行中のバッチは止めず、次の実行から反映。WEB_* の変更は restart が必要）
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure

@@ -212,7 +212,7 @@ watch -n 2 free -h
 `--served-model-name` の先頭を `claude-sonnet-4-5` のままにしたので、`LLM_MODEL` は変えなくてよい。コンテキスト長だけ合わせる。
 
 ```bash
-# /opt/Lang_Chain/.env
+# /opt/Batch_Exec/.env
 LLM_MODEL=claude-sonnet-4-5     # 変えない（--served-model-name の先頭と同じ）
 LLM_NUM_CTX=131072              # 262144 から変更（--max-model-len と同じ）
 LLM_CONCURRENCY=2               # 変えない（--max-num-seqs と同じ）

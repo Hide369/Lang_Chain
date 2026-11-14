@@ -10,13 +10,13 @@
 設定ファイルの読み込みに Python 3.11 以降の標準ライブラリ（`tomllib`）を使う。サーバーの Python のバージョンを確認する。
 
 ```bash
-/opt/Lang_Chain/.venv/bin/python --version   # 3.11 以上であればよい
+/opt/Batch_Exec/.venv/bin/python --version   # 3.11 以上であればよい
 ```
 
 ## 2. プログラムを更新する（`git pull`）
 
 ```bash
-cd /opt/Lang_Chain && git pull
+cd /opt/Batch_Exec && git pull
 ```
 
 次の24ファイルが自動で入れ替わる。手作業は不要。
@@ -41,11 +41,11 @@ cd /opt/Lang_Chain && git pull
 
 ```bash
 # 1. スキルのフォルダ名を変える（今のフォルダ名が go-design-doc でなければ合わせる）
-cd /opt/Lang_Chain/skills && mv go-design-doc design-doc-batch
+cd /opt/Batch_Exec/skills && mv go-design-doc design-doc-batch
 # 2. .env から CLAUDE_SKILL_PATH の行を削除する
-cd /opt/Lang_Chain && sed -i '/^CLAUDE_SKILL_PATH=/d' .env
+cd /opt/Batch_Exec && sed -i '/^CLAUDE_SKILL_PATH=/d' .env
 # 3. 確認
-ls /opt/Lang_Chain/skills/design-doc-batch/SKILL.md && grep -c '^CLAUDE_SKILL_PATH=' /opt/Lang_Chain/.env
+ls /opt/Batch_Exec/skills/design-doc-batch/SKILL.md && grep -c '^CLAUDE_SKILL_PATH=' /opt/Batch_Exec/.env
 ```
 
 `ls` で SKILL.md のパスが表示され、`grep -c` が `0` を表示すれば完了。
@@ -54,7 +54,7 @@ SKILL.md の先頭に `name:` がある場合は、`design-doc-batch` に揃え�
 対象の言語・フォルダを変える場合だけ、設定ファイルを作って編集する（書き方は [target_files.md](target_files.md)）。
 
 ```bash
-cd /opt/Lang_Chain && cp -n targets.example.toml targets.toml
+cd /opt/Batch_Exec && cp -n targets.example.toml targets.toml
 ```
 
 ## 4. 変更しないもの
@@ -70,22 +70,22 @@ cd /opt/Lang_Chain && cp -n targets.example.toml targets.toml
 
 ```bash
 # テスト（Ollama・Claude Code 不要）。「102 passed」と表示されればよい
-cd /opt/Lang_Chain && .venv/bin/python -m pytest
+cd /opt/Batch_Exec && .venv/bin/python -m pytest
 ```
 
 次に、件数を絞って1回実行する（`/srv/repos/myapp` は実際の `--repo` のパスに置き換える）。
 
 ```bash
-cd /opt/Lang_Chain && .venv/bin/python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --limit 3
+cd /opt/Batch_Exec && .venv/bin/python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --limit 3
 ```
 
-最初の行に `対象の設定=/opt/Lang_Chain/targets.example.toml 言語=go` と表示されれば、新しい仕組みで動いている（`targets.toml` を作った場合は、そのパスが表示される）。
+最初の行に `対象の設定=/opt/Batch_Exec/targets.example.toml 言語=go` と表示されれば、新しい仕組みで動いている（`targets.toml` を作った場合は、そのパスが表示される）。
 `エラー: SKILL.md が見つかりません: ...` と表示された場合は、3. のフォルダ名の変更が正しくできているか確認する。
 
 ## 6. 元に戻す場合
 
 ```bash
-cd /opt/Lang_Chain/skills && mv design-doc-batch go-design-doc
-cd /opt/Lang_Chain && echo 'CLAUDE_SKILL_PATH=/opt/Lang_Chain/skills/go-design-doc/SKILL.md' >> .env
-cd /opt/Lang_Chain && git checkout dd92d27   # PR #19 より前の版に戻す（戻した後は main に戻すまで git pull しない）
+cd /opt/Batch_Exec/skills && mv design-doc-batch go-design-doc
+cd /opt/Batch_Exec && echo 'CLAUDE_SKILL_PATH=/opt/Batch_Exec/skills/go-design-doc/SKILL.md' >> .env
+cd /opt/Batch_Exec && git checkout dd92d27   # PR #19 より前の版に戻す（戻した後は main に戻すまで git pull しない）
 ```

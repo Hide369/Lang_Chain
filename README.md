@@ -1,4 +1,4 @@
-# Lang_Chain
+# Batch_Exec
 
 Goソースファイルから詳細設計書(Markdown)を一括生成するLangGraphワークフロー（PoC）。
 GB10サーバー上で動かし、クライアント PC のブラウザ（Web 画面）か、GB10 の端末から起動する（GB10 へは SSH で接続できない前提）。
@@ -64,6 +64,7 @@ Web 画面版（PR #23・#24）への入れ替え手順（夜間タイマーか�
 Ollama を止めて vLLM に切り替える手順（アカウント登録の要否・メモリ枯渇対策・Ollama に戻す手順・vLLM を削除する手順を含む）は [docs/vllm_migration.md](docs/vllm_migration.md) にまとめている。
 vLLM に切り替えた後、アプリ（Web 画面・夜間バッチ）を vLLM 対応版に入れ替える設置手順（`.env`・systemd のユニットの入れ直し・元に戻す方法）は [docs/migration_vllm_app.md](docs/migration_vllm_app.md) にまとめている。
 vLLM のモデルを Qwen3-Coder-Next から Gemma 4 31B に切り替える手順（事前ダウンロード・Hugging Face にログインできない場合の入手先・元に戻す方法）は [docs/vllm_gemma4.md](docs/vllm_gemma4.md) にまとめている。
+既存サーバーの設置フォルダを `/opt/Lang_Chain` から `/opt/Batch_Exec` に移す手順（仮想環境の作り直し・`.env`・systemd の入れ直し・元に戻す方法）は [docs/migration_rename_batch_exec.md](docs/migration_rename_batch_exec.md) にまとめている。
 
 ## サーバー(GB10)へのセットアップ
 
@@ -80,7 +81,7 @@ curl -fsSL https://claude.ai/install.sh | bash
 which claude         # tmux / nohup から起動する場合は、このフルパスを CLAUDE_BIN に指定する
 
 # 3. このフォルダを配置して依存関係をインストール
-cd /opt/Lang_Chain
+cd /opt/Batch_Exec
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env  # LLM_MODEL などを編集（LLM_MODEL は --served-model-name、LLM_NUM_CTX は --max-model-len と同じ値にする）
@@ -89,16 +90,16 @@ cp .env.example .env  # LLM_MODEL などを編集（LLM_MODEL は --served-model
 #    Web 画面を使う場合は、ここでは置かずに、画面の「スキル」タブからクライアント PC のフォルダを選んで登録する（docs/web_ui.md）
 #    Web 画面を使わない場合は、スキルのフォルダを USB メモリや NAS などで GB10 に持ってきてからコピーする
 #    設計書スキルは skills/design-doc-batch/ に置く（フォルダ名を design-doc-batch にする。.env での指定は不要）
-cp -r <持ってきたフォルダ>/design-doc-batch /opt/Lang_Chain/skills/
-cp -r <持ってきたフォルダ>/<コメント追記スキル名> /opt/Lang_Chain/skills/   # コメント追記も行う場合
+cp -r <持ってきたフォルダ>/design-doc-batch /opt/Batch_Exec/skills/
+cp -r <持ってきたフォルダ>/<コメント追記スキル名> /opt/Batch_Exec/skills/   # コメント追記も行う場合
 #    コメント追記スキルは、置いた SKILL.md のパスを .env に書く
-#      CLAUDE_COMMENT_SKILL_PATH=/opt/Lang_Chain/skills/<コメント追記スキル名>/SKILL.md
+#      CLAUDE_COMMENT_SKILL_PATH=/opt/Batch_Exec/skills/<コメント追記スキル名>/SKILL.md
 
 # 5. テスト（推論サーバー・Claude Code 不要）。最後に「N passed」とだけ表示されれば成功
-cd /opt/Lang_Chain && .venv/bin/python -m pytest
+cd /opt/Batch_Exec && .venv/bin/python -m pytest
 ```
 
-テストは `/opt/Lang_Chain`（`pytest.ini` のある場所）で、仮想環境の Python から実行する。上の形なら、ターミナルを開き直して `activate` していなくても動く。
+テストは `/opt/Batch_Exec`（`pytest.ini` のある場所）で、仮想環境の Python から実行する。上の形なら、ターミナルを開き直して `activate` していなくても動く。
 
 推論サーバーの接続先（`ANTHROPIC_BASE_URL` など。`.env` の `LLM_BASE_URL` から作る）は runner が `claude` の起動時に設定するため、シェルに設定する必要はない。
 テレメトリなどモデル以外への通信も `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` で止めている。
@@ -131,7 +132,7 @@ Web 画面を使っている場合は、手順2・3の代わりに画面の「�
 **手順1. サーバーのプログラムを最新にする**
 
 ```bash
-cd /opt/Lang_Chain && git pull && .venv/bin/pip install -r requirements.txt
+cd /opt/Batch_Exec && git pull && .venv/bin/pip install -r requirements.txt
 ```
 
 **手順2. スキルをサーバーに置く**（参照ファイルも含めてフォルダごと。設計書スキルと同じ `skills/` 配下に置く）
@@ -139,8 +140,8 @@ cd /opt/Lang_Chain && git pull && .venv/bin/pip install -r requirements.txt
 スキルのフォルダを USB メモリや NAS などで GB10 に持ってきてからコピーする。
 
 ```bash
-cp -r <持ってきたフォルダ>/<コメント追記スキル名> /opt/Lang_Chain/skills/
-ls /opt/Lang_Chain/skills/<コメント追記スキル名>/SKILL.md   # パスが表示されればよい
+cp -r <持ってきたフォルダ>/<コメント追記スキル名> /opt/Batch_Exec/skills/
+ls /opt/Batch_Exec/skills/<コメント追記スキル名>/SKILL.md   # パスが表示されればよい
 ```
 
 **手順3. `.env` にスキルのパスを1行追記する**
@@ -148,14 +149,14 @@ ls /opt/Lang_Chain/skills/<コメント追記スキル名>/SKILL.md   # パス�
 既存の `.env` に追記する。`.env.example` をコピーし直すと、設定済みの値（`CLAUDE_BIN` など）が消えるので上書きしないこと。
 
 ```bash
-cd /opt/Lang_Chain && grep -q '^CLAUDE_COMMENT_SKILL_PATH=' .env || echo 'CLAUDE_COMMENT_SKILL_PATH=/opt/Lang_Chain/skills/<コメント追記スキル名>/SKILL.md' >> .env
-grep '^CLAUDE_COMMENT_SKILL_PATH=' /opt/Lang_Chain/.env   # 追記した行が表示されればよい
+cd /opt/Batch_Exec && grep -q '^CLAUDE_COMMENT_SKILL_PATH=' .env || echo 'CLAUDE_COMMENT_SKILL_PATH=/opt/Batch_Exec/skills/<コメント追記スキル名>/SKILL.md' >> .env
+grep '^CLAUDE_COMMENT_SKILL_PATH=' /opt/Batch_Exec/.env   # 追記した行が表示されればよい
 ```
 
 **手順4. 3ファイルだけで試す**（コメント追記だけを実行する）
 
 ```bash
-cd /opt/Lang_Chain && .venv/bin/python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --tasks comment --limit 3 --run-id trial-comment
+cd /opt/Batch_Exec && .venv/bin/python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --tasks comment --limit 3 --run-id trial-comment
 ```
 
 - 最初に `run_id=trial-comment タスク=comment 対象=3 件` と表示され、1ファイル終わるごとに `[1/3] done ... comment user_api/pkg/handler/xxx.go` のような行が出る
@@ -166,9 +167,9 @@ cd /opt/Lang_Chain && .venv/bin/python -m godoc_agent.runner --repo /srv/repos/m
 
 ```bash
 # コメント追記済みのファイルの一覧
-cd /opt/Lang_Chain/out/_commented && find . -name '*.go'
+cd /opt/Batch_Exec/out/_commented && find . -name '*.go'
 # 元のファイルとの差分（追記されたコメントだけが表示される）
-diff -ru /srv/repos/myapp/user_api/pkg/handler /opt/Lang_Chain/out/_commented/user_api/pkg/handler
+diff -ru /srv/repos/myapp/user_api/pkg/handler /opt/Batch_Exec/out/_commented/user_api/pkg/handler
 ```
 
 手順4の表示で `done` 以外になったファイルは、次のように対処する（詳細は `out/_runs/trial-comment.jsonl` の `issues` / `error` 欄）。
@@ -248,7 +249,7 @@ GB10 上で Web 画面を常駐させると、クライアント PC のブラウ
   Goソース ──(git push)──> GitLab ──(git pull / HTTPS)──>  /srv/repos/myapp      ← --repo で読む
   ブラウザ ──(Web 画面 http://<GB10>:4000)────────────>  runner ── Claude Code ── vLLM
                                        GB10 の端末からコマンドでも起動できる（tmux / nohup で切り離す）
-  設計書 <──(Web 画面のダウンロード / NAS / git)───────  /opt/Lang_Chain/out   ← --out に書く
+  設計書 <──(Web 画面のダウンロード / NAS / git)───────  /opt/Batch_Exec/out   ← --out に書く
 ```
 
 ### 作業の分担：初回だけの準備と、その後の運用
@@ -272,10 +273,10 @@ Pythonファイルを置くだけでは動かない。最初に1回だけ、次�
 | 作業 | Web 画面 | GB10 の端末 |
 |---|---|---|
 | 設計書の生成 | 「実行」タブで実行。定期実行なら毎日自動 | `tmux new -d ...`（「2. 端末を閉じても止まらないように起動する」） |
-| 進捗・結果の確認 | ログ・実行履歴・セッション欄 | `tail -n 20 /opt/Lang_Chain/out/_runs/<run-id>.log` |
+| 進捗・結果の確認 | ログ・実行履歴・セッション欄 | `tail -n 20 /opt/Batch_Exec/out/_runs/<run-id>.log` |
 | 設計書の取得 | 生成物の一覧から「ダウンロード」 | NAS へのコピー・git（「3. 設計書を取得する」） |
 | SKILL.md の更新 | 「スキル」タブで登録し直す（次の実行から反映される） | `skills/` 配下を上書きする |
-| このリポジトリの更新 | — | `cd /opt/Lang_Chain && git pull && .venv/bin/pip install -r requirements.txt` の後、`sudo systemctl restart godoc-web`（`.env` だけを変えたときは `sudo systemctl reload godoc-web`） |
+| このリポジトリの更新 | — | `cd /opt/Batch_Exec && git pull && .venv/bin/pip install -r requirements.txt` の後、`sudo systemctl restart godoc-web`（`.env` だけを変えたときは `sudo systemctl reload godoc-web`） |
 
 注意:
 
@@ -307,10 +308,10 @@ GB10 の端末で `python -m godoc_agent.runner ...` のように直接起動す
 
 ```bash
 # A. tmux（後から接続して進捗を見られる。推奨）
-tmux new -d -s godoc 'cd /opt/Lang_Chain && mkdir -p out/_runs && .venv/bin/python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --run-id nightly-20261102 2>&1 | tee out/_runs/nightly-20261102.log'
+tmux new -d -s godoc 'cd /opt/Batch_Exec && mkdir -p out/_runs && .venv/bin/python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --run-id nightly-20261102 2>&1 | tee out/_runs/nightly-20261102.log'
 
 # B. nohup（tmuxがない場合）
-cd /opt/Lang_Chain && mkdir -p out/_runs && nohup .venv/bin/python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --run-id nightly-20261102 > out/_runs/nightly-20261102.log 2>&1 < /dev/null &
+cd /opt/Batch_Exec && mkdir -p out/_runs && nohup .venv/bin/python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --run-id nightly-20261102 > out/_runs/nightly-20261102.log 2>&1 < /dev/null &
 ```
 
 - `--run-id` は計測ログ・標準出力ログのファイル名になる。同じ値で再実行すると同じログに追記されるので、明示しておくと追いやすい
@@ -320,7 +321,7 @@ cd /opt/Lang_Chain && mkdir -p out/_runs && nohup .venv/bin/python -m godoc_agen
 進捗の確認:
 
 ```bash
-tail -n 20 /opt/Lang_Chain/out/_runs/nightly-20261102.log   # ログの末尾
+tail -n 20 /opt/Batch_Exec/out/_runs/nightly-20261102.log   # ログの末尾
 tmux attach -t godoc                                        # tmuxの場合（Ctrl-b d で離脱）
 ```
 
@@ -333,7 +334,7 @@ tmux / nohup で起動していれば、**起動後は端末を閉じて GB10 �
 2. サーバーで処理が始まっている
 
    ```bash
-   tail -n 5 /opt/Lang_Chain/out/_runs/nightly-20261102.log
+   tail -n 5 /opt/Batch_Exec/out/_runs/nightly-20261102.log
    ```
 
    `run_id=... 対象=N 件` の後に `[1/N] done ...` のような進捗行が出ていればよい。すぐに `エラー:` が出ている場合は、vLLM・Claude Code・`.env` の設定を見直す
@@ -353,16 +354,16 @@ tmux / nohup で起動していれば、**起動後は端末を閉じて GB10 �
 設計書はサーバー上の `--out` 配下に、ソースファイルと同じフォルダ構成で `詳細設計書_<拡張子を除いたファイル名>.md` として作られる（例：`user.go` → `詳細設計書_user.md`）。
 以前の名前（`user.go.md`）の設計書が残っていれば、次の実行時に新しい名前へ移し、履歴（版）を引き継ぐ。
 拡張子だけが違うソース（`user.go` と `user.ts` など）が同じフォルダにあると出力先が重なるため、2つ目以降は `error` として記録し生成しない。
-`--out ./out` のような相対パスは実行時のカレントディレクトリが基準になるため、このREADMEの手順（`/opt/Lang_Chain` で実行）では `/opt/Lang_Chain/out/` になる。
+`--out ./out` のような相対パスは実行時のカレントディレクトリが基準になるため、このREADMEの手順（`/opt/Batch_Exec` で実行）では `/opt/Batch_Exec/out/` になる。
 
 ```
---repo /srv/repos/myapp  --out ./out （/opt/Lang_Chain で実行）の場合
+--repo /srv/repos/myapp  --out ./out （/opt/Batch_Exec で実行）の場合
 
-/srv/repos/myapp/user_api/pkg/handler/user.go    → /opt/Lang_Chain/out/user_api/pkg/handler/詳細設計書_user.md
-/srv/repos/myapp/order_api/pkg/handler/order.go  → /opt/Lang_Chain/out/order_api/pkg/handler/詳細設計書_order.md
-/opt/Lang_Chain/out/.manifest.json                 … 生成済みファイルの記録（差分スキップ用）
-/opt/Lang_Chain/out/_runs/<run-id>.jsonl           … 計測ログ
-/opt/Lang_Chain/out/_commented/user_api/pkg/handler/user.go … コメント追記済みのファイル（コメント追記を有効にした場合）
+/srv/repos/myapp/user_api/pkg/handler/user.go    → /opt/Batch_Exec/out/user_api/pkg/handler/詳細設計書_user.md
+/srv/repos/myapp/order_api/pkg/handler/order.go  → /opt/Batch_Exec/out/order_api/pkg/handler/詳細設計書_order.md
+/opt/Batch_Exec/out/.manifest.json                 … 生成済みファイルの記録（差分スキップ用）
+/opt/Batch_Exec/out/_runs/<run-id>.jsonl           … 計測ログ
+/opt/Batch_Exec/out/_commented/user_api/pkg/handler/user.go … コメント追記済みのファイル（コメント追記を有効にした場合）
 ```
 
 > **注意：`--repo` に `xx_api` 自体を指定する場合**
@@ -398,7 +399,7 @@ tmux / nohup で起動していれば、**起動後は端末を閉じて GB10 �
 前提：README「サーバー(GB10)へのセットアップ」が済み、手動実行で設計書が生成できていること。
 
 ```bash
-cd /opt/Lang_Chain
+cd /opt/Batch_Exec
 
 # 1. .env の CLAUDE_BIN を claude のフルパスにする（systemd の PATH には ~/.local/bin が入らない）
 which claude          # 例: /home/<ユーザー>/.local/bin/claude → CLAUDE_BIN=/home/<ユーザー>/.local/bin/claude
@@ -427,7 +428,7 @@ systemctl list-timers godoc-nightly.timer          # 次回の実行予定を確
 sudo systemctl start godoc-nightly.service          # 今すぐ1回実行する（終わるまで戻らない。--no-block で即座に戻る）
 systemctl status godoc-nightly.service              # 直近の結果（一部失敗・git pull失敗は failed と表示される）
 journalctl -u godoc-nightly.service -n 50           # 実行ログ
-tail -n 20 /opt/Lang_Chain/out/_runs/nightly-$(date +%Y%m%d).log   # 同じ内容のファイルログ
+tail -n 20 /opt/Batch_Exec/out/_runs/nightly-$(date +%Y%m%d).log   # 同じ内容のファイルログ
 sudo systemctl disable --now godoc-nightly.timer    # 定期実行を止める
 ```
 

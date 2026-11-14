@@ -77,7 +77,7 @@ systemctl is-enabled ollama > ~/ollama-backup/ollama-enabled.txt
 ollama list > ~/ollama-backup/ollama-list.txt
 
 # アプリの設定（パスは自分の環境に合わせる）
-cp /opt/Lang_Chain/.env ~/ollama-backup/env.bak
+cp /opt/Batch_Exec/.env ~/ollama-backup/env.bak
 
 # Web画面・夜間バッチの状態
 systemctl is-active godoc-web godoc-nightly.timer > ~/ollama-backup/godoc-state.txt
@@ -321,7 +321,7 @@ docker run -d --name vllm --gpus all --network host --ipc=host \
 アプリの `.env` を vLLM に向ける。接続先は `LLM_BASE_URL` に書く（`claude` 起動時の `ANTHROPIC_BASE_URL` と、実行前の事前チェックに使われる）。末尾に `/v1` は付けない（Claude Code が `/v1/messages` を付ける）。`LLM_MODEL` は `--served-model-name` の先頭の名前にする。
 
 ```bash
-# /opt/Lang_Chain/.env
+# /opt/Batch_Exec/.env
 LLM_BASE_URL=http://127.0.0.1:11434
 LLM_MODEL=claude-opus-4-6
 ```
@@ -429,7 +429,7 @@ model_list:
 上の確認が済んだら、アプリ自体を vLLM 対応版に入れ替える。事前確認・戻し方を含む詳しい設置手順は [migration_vllm_app.md](migration_vllm_app.md) を参照（ここはその要約）。アプリは推論サーバーを OpenAI 互換の `/v1/models` で事前チェックし、Claude Code から Anthropic 互換の `/v1/messages` を呼ぶ（どちらも vLLM・Ollama の両方にある）。
 
 ```bash
-cd /opt/Lang_Chain
+cd /opt/Batch_Exec
 
 # 1. アプリを vLLM 対応版に更新（Ollama 専用の事前チェックをやめた版。ollama パッケージは不要になった）
 git pull
@@ -503,7 +503,7 @@ sudo systemctl start godoc-nightly.timer
 gpt-oss-120b のコンテキスト長は最大 131072（128K）で、256K にはできない。アプリの `.env` を次のように変える（変更前の `.env` は「準備」で `~/ollama-backup/env.bak` に控えてある）。`LLM_NUM_CTX` を下げると、大きなファイルは事前チェックで `too_large` として対象外になる。
 
 ```bash
-# /opt/Lang_Chain/.env（変えたら sudo systemctl reload godoc-web）
+# /opt/Batch_Exec/.env（変えたら sudo systemctl reload godoc-web）
 LLM_MODEL=gpt-oss-120b
 LLM_NUM_CTX=131072
 ```
@@ -589,7 +589,7 @@ curl http://127.0.0.1:11434/api/tags
 
 # 5. アプリの .env を戻して、Web画面を再起動（LLM_BASE_URL の行が消えるので reload ではなく restart。
 #    控えた .env の OLLAMA_BASE_URL・LLM_MODEL（Modelfile で付けた Claude 名）がそのまま使われる）
-cp ~/ollama-backup/env.bak /opt/Lang_Chain/.env
+cp ~/ollama-backup/env.bak /opt/Batch_Exec/.env
 sudo systemctl restart godoc-web
 
 # 6. 夜間バッチを止めていた場合は再開
