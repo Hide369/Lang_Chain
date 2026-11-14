@@ -148,7 +148,7 @@ sudo systemctl edit godoc-web.service
 RequiresMountsFor=/mnt/nas/repos
 ```
 
-夜間タイマー（`godoc-nightly.service`）を使っている場合は、同じ設定を入れる。あわせて、対象（`GODOC_REPO`）を NAS 上のパスにする。
+夜間タイマー（`godoc-nightly.service`）を使っている場合は、同じ設定を入れる。あわせて、`.env` の対象（`GODOC_REPO=/mnt/nas/repos/myapp`）を NAS 上のパスにする（設定は `.env` に一本化しているため、ユニットには `Environment=` を書かない）。
 
 ```bash
 sudo systemctl edit godoc-nightly.service
@@ -158,8 +158,6 @@ sudo systemctl edit godoc-nightly.service
 [Unit]
 RequiresMountsFor=/mnt/nas/repos
 
-[Service]
-Environment=GODOC_REPO=/mnt/nas/repos/myapp
 ```
 
 反映する。

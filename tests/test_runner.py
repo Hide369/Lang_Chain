@@ -7,6 +7,7 @@ import pytest
 
 from conftest import ScriptedLLM, claude_result, good_doc, reply
 from godoc_agent import runner
+from godoc_agent.claude_code import ContextOverflowError
 from godoc_agent.config import load_settings
 from godoc_agent.runlock import RunLockBusy, run_lock
 from godoc_agent.skill_registry import COMMENT_ONLY, DOCUMENT, REWRITE, write_registry
@@ -45,7 +46,6 @@ def skill_file(tmp_path: Path) -> Path:
 def env(monkeypatch, tmp_path: Path, skill_file: Path):
     monkeypatch.setenv("CLAUDE_SKILL_PATH", str(skill_file))
     monkeypatch.delenv("CLAUDE_COMMENT_SKILL_PATH", raising=False)
-    monkeypatch.setenv("LLM_CONCURRENCY", "1")  # 応答の順序を決定的にする
     # 手元に targets.toml があっても結果が変わらないよう、例の設定（Go の handler 配下）に固定する
     monkeypatch.setenv("TARGETS_CONFIG", str(Path(runner.__file__).resolve().parent.parent / "targets.example.toml"))
 
@@ -60,7 +60,9 @@ def use_llm(monkeypatch, llm: ScriptedLLM) -> None:
 
 
 async def run_batch(repo: Path, out: Path, *extra: str) -> int:
-    args = runner.parse_args(["--repo", str(repo), "--out", str(out), "--run-id", "r1", *extra])
+    # 指定がなければ1セッションずつ処理し、応答の順序を決定的にする
+    concurrency = [] if "--concurrency" in extra else ["--concurrency", "1"]
+    args = runner.parse_args(["--repo", str(repo), "--out", str(out), "--run-id", "r1", *concurrency, *extra])
     return await runner.run(args, load_settings())
 
 
@@ -352,15 +354,36 @@ async def test_comment_task_requires_its_skill_path(env, repo, tmp_path):
         await run_batch(repo, tmp_path / "out", "--tasks", "doc,comment")
 
 
-async def test_comment_task_rejects_file_exceeding_output_limit(env, comment_skill, monkeypatch, repo, tmp_path):
-    # ファイル全文を出力するため、LLM_NUM_PREDICT から決まる上限を超えるファイルはLLMを呼ばずに弾く
+async def test_comment_task_skips_file_exceeding_output_limit_with_warning(env, comment_skill, monkeypatch, repo, tmp_path):
+    # ファイル全文を出力するため、LLM_NUM_PREDICT から決まる上限を超えるファイルはLLMを呼ばずに弾く。
+    # 失敗にはせず、警告付きでスキップする（バッチは成功扱い）
     monkeypatch.setenv("LLM_NUM_PREDICT", "10")
     use_llm(monkeypatch, ScriptedLLM([]))
 
-    assert await run_batch(repo, tmp_path / "out", "--tasks", "comment") == 1
+    assert await run_batch(repo, tmp_path / "out", "--tasks", "comment") == 0
 
-    logs = (tmp_path / "out" / "_runs" / "r1.jsonl").read_text(encoding="utf-8").splitlines()
-    assert {json.loads(line)["status"] for line in logs} == {"too_large"}
+    logs = [json.loads(line) for line in (tmp_path / "out" / "_runs" / "r1.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert {log["status"] for log in logs} == {"too_large"}
+    assert all("スキップ" in log["warnings"][0] for log in logs)
+
+
+async def test_context_overflow_is_skipped_with_warning_and_batch_continues(env, monkeypatch, repo, tmp_path, capsys):
+    # 256k を超えて vLLM に断られたファイルは、再試行せずに警告付きでスキップし、残りのファイルは処理する
+    out = tmp_path / "out"
+    overflow = ContextOverflowError("This model's maximum context length is 262144 tokens")
+    llm = PerFileLLM({HEALTH: [overflow], USER: [reply(good_doc("GetUser"))]})
+    use_llm(monkeypatch, llm)
+
+    assert await run_batch(repo, out) == 0
+
+    logs = {log["rel_path"]: log for log in map(json.loads, (out / "_runs" / "r1.jsonl").read_text(encoding="utf-8").splitlines())}
+    assert logs[HEALTH]["status"] == "context_overflow"
+    assert "スキップ" in logs[HEALTH]["warnings"][0]
+    assert logs[USER]["status"] == "done"
+    assert not (out / HEALTH_DOC).exists()
+    # 次回の実行でもう一度試せるよう、差分スキップには記録しない
+    assert set(json.loads((out / ".manifest.json").read_text(encoding="utf-8"))) == {USER}
+    assert "スキップした件数: 1 件" in capsys.readouterr().out
 
 
 async def test_unknown_task_name_is_rejected(env, repo, tmp_path, monkeypatch):
@@ -526,7 +549,10 @@ class PerFileLLM:
     async def ainvoke(self, messages, config=None, **kwargs):
         request = messages[-1].content
         path = next(p for p in self._responses if p in request)
-        return self._responses[path].pop(0)
+        item = self._responses[path].pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
 
 
 @pytest.fixture
@@ -542,7 +568,6 @@ async def test_concurrency_option_limits_simultaneous_sessions(env, monkeypatch,
     llm = ConcurrencyProbeLLM()
     use_llm(monkeypatch, llm)
 
-    # .env（LLM_CONCURRENCY=1）より --concurrency を優先する
     assert await run_batch(many_files, tmp_path / "out", "--concurrency", sessions) == 0
 
     assert llm.max_active == min(int(sessions), 5)

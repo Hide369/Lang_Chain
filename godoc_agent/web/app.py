@@ -2,11 +2,14 @@
 
 - 閲覧（状態・ログ・履歴・生成物）は誰でもできる（WEB_VIEW_REQUIRES_LOGIN=true なら管理者だけ）
 - 実行・停止と、設定の変更（フォルダ・スキル・対象）は管理者だけ。設定の変更は実行中は受け付けない
+- 複数人が同時に使える。対象・出力先フォルダはブラウザごと（Cookie の利用者ID ごと）に選び、
+  出力先が違えば同時に実行できる（Claude Code のセッションはサーバー全体で最大10。slots.py）
 """
 
 import base64
 import binascii
 import json
+import secrets
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -16,7 +19,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
-from ..config import MAX_CONCURRENCY, load_concurrency
+from ..config import DEFAULT_CONCURRENCY, MAX_CONCURRENCY
 from ..skill_registry import OUTPUT_TYPE_LABELS, OUTPUT_TYPES
 from .auth import LoginThrottle, SessionStore, validate_password_hash, verify_password
 from .git_repo import GitRepoError, inspect_repo
@@ -25,9 +28,12 @@ from .schedule import Scheduler, ScheduleStore
 from .settings import APP_DIR, WebSettings
 from .skills import SkillFile, SkillStore
 from .targets_editor import TargetsEditor
-from .workspace import WorkspaceStore
+from .workspace import CLIENT_ID_RE, WorkspaceStore
 
 COOKIE_NAME = "godoc_session"
+# ブラウザごとの利用者ID（ログインとは別。選んだフォルダをブラウザごとに覚えるため。秘密ではない）
+CLIENT_COOKIE_NAME = "godoc_client"
+CLIENT_COOKIE_MAX_AGE_S = 400 * 24 * 3600
 # 状態を変える操作に必須のヘッダー。別サイトのフォームからは付けられないため、CSRF 対策になる
 CSRF_HEADER = "X-Requested-With"
 CSRF_VALUE = "godoc-web"
@@ -46,8 +52,13 @@ class RunRequest(BaseModel):
     limit: int = Field(default=0, ge=0, le=100_000)
     force: bool = False
     git_pull: bool = False
-    # 同時に動かす Claude Code のセッション数。省略時は .env の LLM_CONCURRENCY
+    # この実行で同時に動かす Claude Code のセッション数。省略時は DEFAULT_CONCURRENCY（サーバー全体でも MAX_CONCURRENCY まで）
     concurrency: int | None = Field(default=None, ge=1, le=MAX_CONCURRENCY)
+
+
+class StopRequest(BaseModel):
+    # 止める実行。省略時は、このブラウザで選んでいる出力先の実行
+    run_id: str | None = Field(default=None, max_length=200)
 
 
 class ScheduleRequest(BaseModel):
@@ -149,19 +160,41 @@ def create_app(
             raise HTTPException(401, "ログインしてください")
 
     def require_idle() -> None:
-        # 実行中に設定を変えると、どの設定で動いた結果か分からなくなるため
+        # スキル・対象の設定はすべての実行で共有するため、誰かの実行中に変えると、どの設定で動いた結果か分からなくなる
         if jobs.running:
-            raise HTTPException(409, "実行中は設定を変更できません。終了または停止してから変更してください")
+            raise HTTPException(409, "実行中は設定を変更できません。すべての実行が終了してから変更してください")
 
-    def current_out() -> Path | None:
-        out = workspace.get().out
+    def client_id(request: Request) -> str | None:
+        return getattr(request.state, "client_id", None)
+
+    def current_workspace(request: Request):
+        return workspace.get(client_id(request))
+
+    def current_out(request: Request) -> Path | None:
+        out = current_workspace(request).out
         return Path(out) if out else None
 
-    def out_for_view() -> Path:
-        out = current_out()
+    def out_for_view(request: Request) -> Path:
+        out = current_out(request)
         if out is None:
             raise HTTPException(409, "出力先フォルダが未設定です")
         return out
+
+    @app.middleware("http")
+    async def client_cookie(request: Request, call_next):
+        # 初めてのブラウザには利用者IDを発行する（選んだフォルダをブラウザごとに覚えるため）
+        raw = request.cookies.get(CLIENT_COOKIE_NAME)
+        issued = None
+        if not raw or not CLIENT_ID_RE.match(raw):
+            raw = issued = secrets.token_urlsafe(24)
+        request.state.client_id = raw
+        response = await call_next(request)
+        if issued:
+            response.set_cookie(
+                CLIENT_COOKIE_NAME, issued, max_age=CLIENT_COOKIE_MAX_AGE_S,
+                httponly=True, secure=settings.cookie_secure, samesite="strict", path="/",
+            )
+        return response
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
@@ -214,35 +247,32 @@ def create_app(
 
     # --- 閲覧 --------------------------------------------------------------------------
 
-    def concurrency_view() -> dict:
-        try:
-            default, error = load_concurrency(), None
-        except ValueError as e:  # .env の値が範囲外。画面で指定すれば実行はできる
-            default, error = None, str(e)
-        return {"default": default, "max": MAX_CONCURRENCY, "error": error}
-
     @app.get("/api/config", dependencies=[Depends(require_viewer)])
-    def config() -> dict:
-        ws = workspace.get()
-        return {"tasks": task_options(), "workspace": {"repo": ws.repo, "out": ws.out}, "concurrency": concurrency_view()}
+    def config(request: Request) -> dict:
+        ws = current_workspace(request)
+        return {
+            "tasks": task_options(),
+            "workspace": {"repo": ws.repo, "out": ws.out},
+            "concurrency": {"default": DEFAULT_CONCURRENCY, "max": MAX_CONCURRENCY},
+        }
 
     @app.get("/api/status", dependencies=[Depends(require_viewer)])
-    def status() -> dict:
-        return jobs.status(current_out())
+    def status(request: Request) -> dict:
+        return jobs.status(current_out(request))
 
     @app.get("/api/runs", dependencies=[Depends(require_viewer)])
-    def history() -> list[dict]:
-        out = current_out()
+    def history(request: Request) -> list[dict]:
+        out = current_out(request)
         return jobs.history(out) if out else []
 
-    def out_of_run(run_id: str) -> Path:
-        job = jobs.current
-        # 実行後に出力先を変えても、その実行のログは読めるようにする
-        return job.out_dir if job is not None and job.run_id == run_id else out_for_view()
+    def out_of_run(run_id: str, request: Request) -> Path:
+        job = jobs.get(run_id)
+        # 実行後に出力先を変えても、Web から起動した実行のログは読めるようにする
+        return job.out_dir if job is not None else out_for_view(request)
 
     @app.get("/api/runs/{run_id}/log", dependencies=[Depends(require_viewer)])
-    def run_log(run_id: str, offset: int = 0) -> dict:
-        out = out_of_run(run_id)
+    def run_log(run_id: str, request: Request, offset: int = 0) -> dict:
+        out = out_of_run(run_id, request)
         try:
             return jobs.read_log(out, run_id, offset)
         except ValueError as e:
@@ -251,8 +281,8 @@ def create_app(
             raise HTTPException(404, "ログが見つかりません") from e
 
     @app.get("/api/runs/{run_id}/sessions", dependencies=[Depends(require_viewer)])
-    def run_sessions(run_id: str) -> dict:
-        out = out_of_run(run_id)
+    def run_sessions(run_id: str, request: Request) -> dict:
+        out = out_of_run(run_id, request)
         try:
             return jobs.read_sessions(out, run_id)
         except json.JSONDecodeError as e:  # ValueError の一種なので先に捕まえる
@@ -263,14 +293,14 @@ def create_app(
             raise HTTPException(404, "セッションの記録がありません（この機能より前の実行です）") from e
 
     @app.get("/api/outputs", dependencies=[Depends(require_viewer)])
-    def outputs() -> list[dict]:
-        out = current_out()
+    def outputs(request: Request) -> list[dict]:
+        out = current_out(request)
         return jobs.list_outputs(out) if out else []
 
     @app.get("/api/outputs/file", dependencies=[Depends(require_viewer)])
-    def output_file(path: str, download: bool = False):
+    def output_file(path: str, request: Request, download: bool = False):
         try:
-            file = jobs.output_file(out_for_view(), path)
+            file = jobs.output_file(out_for_view(request), path)
         except PermissionError as e:
             raise HTTPException(403, "このファイルは表示できません") from e
         except FileNotFoundError as e:
@@ -283,8 +313,8 @@ def create_app(
     # --- 実行（管理者だけ） --------------------------------------------------------------
 
     @app.post("/api/runs", status_code=202, dependencies=[Depends(require_admin)])
-    def start_run(body: RunRequest) -> dict:
-        ws = workspace.get()
+    def start_run(body: RunRequest, request: Request) -> dict:
+        ws = current_workspace(request)
         if not ws.repo or not ws.out:
             raise HTTPException(400, "対象フォルダと出力先フォルダを設定してください")
         try:
@@ -302,8 +332,12 @@ def create_app(
         return job.to_dict()
 
     @app.post("/api/runs/stop", dependencies=[Depends(require_admin)])
-    def stop_run() -> dict:
-        job = jobs.stop()
+    def stop_run(request: Request, body: StopRequest | None = None) -> dict:
+        run_id = body.run_id if body and body.run_id else None
+        if run_id is None:
+            mine = jobs.job_for(current_out(request))
+            run_id = mine.run_id if mine else None
+        job = jobs.stop(run_id) if run_id else None
         if job is None:
             raise HTTPException(409, "Web から起動した実行中の処理はありません")
         return job.to_dict()
@@ -318,6 +352,8 @@ def create_app(
             "time": schedule.time,
             "tasks": schedule.tasks,
             "git_pull": schedule.git_pull,
+            "repo": schedule.repo,
+            "out": schedule.out,
             "next_run_at": next_run.isoformat(timespec="minutes") if next_run else None,
             "last_run": schedule.last_run,
         }
@@ -327,14 +363,17 @@ def create_app(
         return schedule_view()
 
     @app.put("/api/schedule", dependencies=[Depends(require_admin)])
-    def save_schedule(body: ScheduleRequest) -> dict:
+    def save_schedule(body: ScheduleRequest, request: Request) -> dict:
         tasks = check_tasks(body.tasks)
-        repo = workspace.get().repo
+        # 定期実行は、保存した人がいま選んでいるフォルダで動かす
+        ws = current_workspace(request)
         # フォルダが未設定なら、実行時に「開始できなかった」と記録される（ここでは保存を妨げない）
-        if body.enabled and body.git_pull and repo:
-            check_pullable(Path(repo))
+        if body.enabled and body.git_pull and ws.repo:
+            check_pullable(Path(ws.repo))
         try:
-            schedule_store.save_settings(body.enabled, body.time, tasks, body.git_pull, clock())
+            schedule_store.save_settings(
+                body.enabled, body.time, tasks, body.git_pull, clock(), repo=ws.repo, out=ws.out,
+            )
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
         return schedule_view()
@@ -350,10 +389,12 @@ def create_app(
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
 
-    @app.put("/api/workspace", dependencies=[Depends(require_admin), Depends(require_idle)])
-    def set_workspace(body: WorkspaceRequest) -> dict:
+    # フォルダはブラウザごとに選び、実行は起動したときのフォルダを持ち続けるため、実行中でも変えられる
+    # （まだ選んでいないブラウザが、他の人の実行中の出力先を初期値として見ていても選び直せるように）
+    @app.put("/api/workspace", dependencies=[Depends(require_admin)])
+    def set_workspace(body: WorkspaceRequest, request: Request) -> dict:
         try:
-            ws = workspace.set(body.repo, body.out)
+            ws = workspace.set(body.repo, body.out, client_id(request))
         except (ValueError, PermissionError) as e:
             raise HTTPException(400, str(e)) from e
         return {"repo": ws.repo, "out": ws.out}
@@ -427,8 +468,8 @@ def create_app(
             raise HTTPException(400, str(e)) from e
 
     @app.post("/api/targets/preview", dependencies=[Depends(require_admin)])
-    def preview_targets(body: TargetsRequest) -> dict:
-        repo = workspace.get().repo
+    def preview_targets(body: TargetsRequest, request: Request) -> dict:
+        repo = current_workspace(request).repo
         if not repo:
             raise HTTPException(400, "対象フォルダを設定してください")
         try:

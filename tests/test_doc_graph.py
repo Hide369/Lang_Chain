@@ -6,6 +6,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from conftest import SAMPLE_GO, ScriptedLLM, good_doc, reply
+from godoc_agent.claude_code import ContextOverflowError
 from godoc_agent.doc_graph import build_doc_graph
 from godoc_agent.tasks import comment_task, design_doc_task, find_comment_issues, find_doc_issues
 
@@ -130,6 +131,18 @@ async def test_oversized_source_is_rejected_before_calling_llm():
 
     assert state["status"] == "too_large"
     assert llm.calls == []
+
+
+async def test_context_overflow_ends_without_retry():
+    # 入力がコンテキストを超えて推論サーバーに断られたら、同じ入力で再生成しても無駄なので再試行しない
+    llm = ScriptedLLM([ContextOverflowError("maximum context length is 262144 tokens")])
+
+    state = await run(compile_graph(llm))
+
+    assert state["status"] == "context_overflow"
+    assert state["attempts"] == 1
+    assert len(llm.calls) == 1
+    assert "262144" in state["issues"][0]
 
 
 async def test_previous_doc_is_passed_to_initial_messages():

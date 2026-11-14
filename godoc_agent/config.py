@@ -20,15 +20,13 @@ def _int_env(name: str, default: int, minimum: int = 1, maximum: int | None = No
     return value
 
 
-# 同時に動かす Claude Code のセッション数の上限。推論サーバーの同時処理数（vLLM の --max-num-seqs、
-# Ollama の OLLAMA_NUM_PARALLEL）と GPU メモリ（並列数に比例して KV キャッシュが増える）の現実的な範囲に抑える
+# 同時に動かす Claude Code のセッション数の上限（サーバー全体の合計。Web 画面の複数の実行・夜間バッチ・
+# コマンドからの実行をまたいで数える。slots.py を参照）。vLLM 側では同時処理数を絞っていないため、
+# GPU メモリ（並列数に比例して KV キャッシュが増える）の現実的な範囲としてアプリ側で抑える
 MAX_CONCURRENCY = 10
-DEFAULT_CONCURRENCY = 2
-
-
-def load_concurrency() -> int:
-    """同時セッション数の既定値（LLM_CONCURRENCY）。1〜MAX_CONCURRENCY。"""
-    return _int_env("LLM_CONCURRENCY", DEFAULT_CONCURRENCY, maximum=MAX_CONCURRENCY)
+# 1回の実行で使うセッション数の既定値（--concurrency・画面で指定しなかったとき）。
+# 全体の上限と同じにし、1人で使うときは全枠を使い、複数人で同時に実行したときは全体の枠を取り合う
+DEFAULT_CONCURRENCY = MAX_CONCURRENCY
 
 
 def _ratio_env(name: str, default: float) -> float:
@@ -66,13 +64,14 @@ def targets_config_path(base_dir: Path) -> Path:
     return local if local.is_file() else base_dir / "targets.example.toml"
 
 
-# 推論サーバー（vLLM）の既定の接続先。Claude Code はこの URL に /v1/messages を付けて呼ぶ
-DEFAULT_LLM_BASE_URL = "http://127.0.0.1:8000"
+# 推論サーバー（vLLM）の既定の接続先。Claude Code はこの URL に /v1/messages を付けて呼ぶ。
+# Ollama から vLLM に移行したサーバーでも、Ollama と同じ 11434 番ポートで vLLM を待ち受けている
+DEFAULT_LLM_BASE_URL = "http://127.0.0.1:11434"
 
 
 def llm_base_url() -> str:
-    """推論サーバーの接続先。LLM_BASE_URL > OLLAMA_BASE_URL（Ollama 時代の .env をそのまま使えるように）の順に使う。"""
-    return os.getenv("LLM_BASE_URL") or os.getenv("OLLAMA_BASE_URL") or DEFAULT_LLM_BASE_URL
+    """推論サーバーの接続先（.env の LLM_BASE_URL）。"""
+    return os.getenv("LLM_BASE_URL") or DEFAULT_LLM_BASE_URL
 
 
 @dataclass(frozen=True)
@@ -82,7 +81,6 @@ class Settings:
     num_ctx: int
     ctx_warn_ratio: float
     num_predict: int
-    concurrency: int
     max_attempts: int
     claude_bin: str
     claude_skill_path: Path
@@ -93,8 +91,8 @@ class Settings:
 
     @property
     def max_source_chars(self) -> int:
-        # Ollama はコンテキスト超過を「黙って切り捨て」、vLLM はリクエストごと失敗させるため、
-        # どちらでも大きすぎるファイルは送る前に弾く。
+        # vLLM はコンテキスト（--max-model-len）を超えるリクエストを失敗させるため、
+        # 大きすぎるファイルは送る前に弾く（警告付きでスキップする）。
         # 1トークン≒3文字（Goコード+日本語の保守的な見積り）とし、Claude Code の指示文・
         # スキル・関連ファイル・出力の分として半分をエージェントの作業領域に残す。
         return self.num_ctx * 3 // 2
@@ -113,6 +111,12 @@ class Settings:
 
 APP_DIR = Path(__file__).resolve().parent.parent
 
+# vLLM の --served-model-name に付けた別名（ヘッドレスの Claude Code は Claude のモデル名しか受け付けない）
+DEFAULT_LLM_MODEL = "claude-opus-4-6"
+# ターン数・タイムアウト（秒）の既定値。事実上の無制限（タイムアウトは約11.5日）。
+# コンテキストを超えたファイルは警告付きでスキップされるため、ターン数や時間では打ち切らない
+UNLIMITED = 1_000_000
+
 
 def design_skill_path(base_dir: Path) -> Path:
     """設計書スキル。CLAUDE_SKILL_PATH > skills/design-doc-batch/SKILL.md の順に使う。"""
@@ -123,17 +127,15 @@ def load_settings() -> Settings:
     base_dir = APP_DIR
     return Settings(
         llm_base_url=llm_base_url(),
-        model=os.getenv("LLM_MODEL", "qwen3-coder-next"),
+        model=os.getenv("LLM_MODEL", DEFAULT_LLM_MODEL),
         num_ctx=_int_env("LLM_NUM_CTX", 262144, minimum=4096),
         ctx_warn_ratio=_ratio_env("LLM_CTX_WARN_RATIO", 0.9),
         num_predict=_int_env("LLM_NUM_PREDICT", 8192),
-        concurrency=load_concurrency(),
         max_attempts=_int_env("DOC_MAX_ATTEMPTS", 3),
         claude_bin=os.getenv("CLAUDE_BIN", "claude"),
         claude_skill_path=design_skill_path(base_dir),
         claude_comment_skill_path=comment_skill_path(base_dir),
-        claude_max_turns=_int_env("CLAUDE_MAX_TURNS", 30),
-        # エージェントはファイルを読みながら複数回LLMを呼ぶため、長めに取る
-        claude_timeout_s=_int_env("CLAUDE_TIMEOUT_S", 1800),
+        claude_max_turns=_int_env("CLAUDE_MAX_TURNS", UNLIMITED),
+        claude_timeout_s=_int_env("CLAUDE_TIMEOUT_S", UNLIMITED),
         targets=load_targets(targets_config_path(base_dir)),
     )

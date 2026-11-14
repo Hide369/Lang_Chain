@@ -22,7 +22,8 @@ def lock_path(out_dir: Path) -> Path:
     return out_dir / LOCK_FILE_NAME
 
 
-def _try_lock(f: IO[str]) -> bool:
+def try_lock_file(f: IO[str]) -> bool:
+    """開いたファイルの排他ロックを待たずに取る。取れたら True。プロセスが終了すれば OS が解放する。"""
     try:
         if os.name == "nt":
             import msvcrt
@@ -38,7 +39,7 @@ def _try_lock(f: IO[str]) -> bool:
     return True
 
 
-def _unlock(f: IO[str]) -> None:
+def unlock_file(f: IO[str]) -> None:
     if os.name == "nt":
         import msvcrt
 
@@ -56,12 +57,12 @@ def run_lock(out_dir: Path) -> Iterator[None]:
     out_dir.mkdir(parents=True, exist_ok=True)
     f = lock_path(out_dir).open("a+", encoding="utf-8")
     try:
-        if not _try_lock(f):
+        if not try_lock_file(f):
             raise RunLockBusy(f"別の実行が進行中です（出力先: {out_dir}）。終了してから再実行してください")
         try:
             yield
         finally:
-            _unlock(f)
+            unlock_file(f)
     finally:
         f.close()
 

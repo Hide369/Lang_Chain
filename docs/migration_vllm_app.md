@@ -9,8 +9,8 @@ vLLM 自体の導入・起動は [vllm_migration.md](vllm_migration.md) の手�
 
 | 変更 | 以前 | この版 |
 |---|---|---|
-| 推論サーバーの接続先 | `.env` の `OLLAMA_BASE_URL`（既定 `http://127.0.0.1:11434`） | `.env` の `LLM_BASE_URL`（既定 `http://127.0.0.1:8000`）。なければ `OLLAMA_BASE_URL` を使う |
-| モデル名 | Ollama の Modelfile で付けた Claude 名 | vLLM の `--served-model-name` の別名（`claude-sonnet-4-5`）。Claude Code のヘッドレスモードは Claude のモデル名しか受け付けないため |
+| 推論サーバーの接続先 | `.env` の `OLLAMA_BASE_URL`（既定 `http://127.0.0.1:11434`） | `.env` の `LLM_BASE_URL`（既定 `http://127.0.0.1:11434`。Ollama と同じポートで vLLM を待ち受ける。`OLLAMA_BASE_URL` は読まない） |
+| モデル名 | Ollama の Modelfile で付けた Claude 名 | vLLM の `--served-model-name` の別名（`claude-opus-4-6`）。Claude Code のヘッドレスモードは Claude のモデル名しか受け付けないため |
 | 実行前の事前チェック | Ollama 固有の API（`/api/show`）。vLLM では必ず失敗した | OpenAI 互換の `/v1/models`。vLLM・Ollama の両方で動く |
 | systemd のユニット | `Wants=`・`After=ollama.service` を持っていた | 推論サーバーに依存しない（vLLM の `Conflicts=ollama.service` と衝突しない） |
 | `systemctl reload godoc-web` | 非対応（`Job type reload is not applicable` で失敗） | `.env` を読み直す。実行中のバッチは止めず、次の実行から反映する |
@@ -23,20 +23,20 @@ vLLM 自体の導入・起動は [vllm_migration.md](vllm_migration.md) の手�
 ### 1-1. vLLM が別名で応答すること
 
 ```bash
-# 提供中のモデル名（claude-sonnet-4-5 が出ること）
-curl -s http://127.0.0.1:8000/v1/models
+# 提供中のモデル名（claude-opus-4-6 が出ること）
+curl -s http://127.0.0.1:11434/v1/models
 
 # Claude Code が使う Anthropic 互換API（/v1/messages）が応答すること
-curl -s http://127.0.0.1:8000/v1/messages \
+curl -s http://127.0.0.1:11434/v1/messages \
   -H "Content-Type: application/json" -H "x-api-key: local" -H "anthropic-version: 2023-06-01" \
-  -d '{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"こんにちは"}],"max_tokens":64}'
+  -d '{"model":"claude-opus-4-6","messages":[{"role":"user","content":"こんにちは"}],"max_tokens":64}'
 ```
 
 | 結果 | 対応 |
 |---|---|
 | どちらも JSON が返る | 次へ進む |
 | `Connection refused` | vLLM が止まっている。[vllm_migration.md](vllm_migration.md) の手順3で起動する |
-| `/v1/models` に別の名前しか出ない | vLLM を `--served-model-name claude-sonnet-4-5` で起動し直す（または後の `.env` の `LLM_MODEL` を出ている名前に合わせる） |
+| `/v1/models` に別の名前しか出ない | vLLM を `--served-model-name claude-opus-4-6` で起動し直す（または後の `.env` の `LLM_MODEL` を出ている名前に合わせる） |
 | `/v1/messages` だけ `404` | vLLM が古く Anthropic 互換API がない。新しいタグのコンテナで起動し直す |
 
 ### 1-2. 実行中のバッチがないこと
@@ -85,17 +85,16 @@ cd /opt/Lang_Chain && .venv/bin/python -m pytest -q   # 最後に「N passed」�
 nano /opt/Lang_Chain/.env
 ```
 
-次の4つを、vLLM の起動オプションと同じ値にする。`OLLAMA_BASE_URL` の行は消す（残しても `LLM_BASE_URL` が優先されるが、紛らわしいため）。
+次の3つを、vLLM の起動オプションと同じ値にする。`OLLAMA_BASE_URL`・`LLM_CONCURRENCY` の行は消す（どちらももう読まない）。
 
 ```bash
-LLM_BASE_URL=http://127.0.0.1:8000   # vLLM の --port
-LLM_MODEL=claude-sonnet-4-5          # vLLM の --served-model-name
+LLM_BASE_URL=http://127.0.0.1:11434  # vLLM の --port（Ollama と同じ 11434）
+LLM_MODEL=claude-opus-4-6          # vLLM の --served-model-name
 LLM_NUM_CTX=262144                   # vLLM の --max-model-len
-LLM_CONCURRENCY=2                    # vLLM の --max-num-seqs
 ```
 
 ```bash
-# 確認（4行が上の値で出て、OLLAMA_BASE_URL が出なければよい）
+# 確認（3行が上の値で出て、OLLAMA_BASE_URL・LLM_CONCURRENCY が出なければよい）
 grep -E '^(LLM_BASE_URL|LLM_MODEL|LLM_NUM_CTX|LLM_CONCURRENCY|OLLAMA_BASE_URL)=' /opt/Lang_Chain/.env
 ```
 

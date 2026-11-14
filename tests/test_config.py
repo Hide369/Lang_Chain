@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from godoc_agent import config
-from godoc_agent.config import MAX_CONCURRENCY, comment_skill_path, load_settings, targets_config_path
+from godoc_agent.config import DEFAULT_CONCURRENCY, MAX_CONCURRENCY, comment_skill_path, load_settings, targets_config_path
 
 REPO_ROOT = Path(config.__file__).resolve().parent.parent
 
@@ -25,13 +25,14 @@ def test_design_skill_path_can_still_be_overridden(monkeypatch, tmp_path):
     assert load_settings().claude_skill_path == tmp_path / "SKILL.md"
 
 
-def test_llm_base_url_defaults_to_local_vllm():
-    assert load_settings().llm_base_url == "http://127.0.0.1:8000"
+def test_llm_base_url_defaults_to_vllm_on_ollama_port():
+    # Ollama から vLLM に移行したサーバーでは、vLLM を Ollama と同じ 11434 番ポートで待ち受けている
+    assert load_settings().llm_base_url == "http://127.0.0.1:11434"
 
 
-def test_llm_base_url_falls_back_to_ollama_setting_then_prefers_llm_base_url(monkeypatch):
-    # Ollama に戻すとき、控えておいた古い .env（OLLAMA_BASE_URL だけ）をそのまま使えるようにする
-    monkeypatch.setenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+def test_llm_base_url_is_read_only_from_llm_base_url(monkeypatch):
+    # 設定は .env の LLM_BASE_URL に一本化する（Ollama 時代の OLLAMA_BASE_URL は読まない）
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://127.0.0.1:9999")
     assert load_settings().llm_base_url == "http://127.0.0.1:11434"
 
     monkeypatch.setenv("LLM_BASE_URL", "http://127.0.0.1:8000")
@@ -77,14 +78,22 @@ def test_comment_skill_is_used_when_placed_in_default_folder(tmp_path, monkeypat
     assert comment_skill_path(tmp_path) == tmp_path / "other" / "SKILL.md"
 
 
-def test_concurrency_allows_up_to_ten_sessions(monkeypatch):
-    monkeypatch.setenv("LLM_CONCURRENCY", str(MAX_CONCURRENCY))
+def test_session_count_defaults_to_server_wide_limit_of_ten():
     assert MAX_CONCURRENCY == 10
-    assert load_settings().concurrency == 10
+    assert DEFAULT_CONCURRENCY == MAX_CONCURRENCY
 
 
-@pytest.mark.parametrize("value", ["0", "11"])
-def test_concurrency_outside_one_to_ten_fails_at_startup(monkeypatch, value):
-    monkeypatch.setenv("LLM_CONCURRENCY", value)
-    with pytest.raises(ValueError, match="LLM_CONCURRENCY"):
-        load_settings()
+def test_obsolete_llm_concurrency_in_env_is_ignored(monkeypatch):
+    # LLM_CONCURRENCY は廃止した。古い .env に残っていても起動を妨げない
+    monkeypatch.setenv("LLM_CONCURRENCY", "abc")
+    assert not hasattr(load_settings(), "concurrency")
+
+
+def test_model_and_unlimited_turns_and_timeout_defaults(monkeypatch):
+    for name in ("LLM_MODEL", "CLAUDE_MAX_TURNS", "CLAUDE_TIMEOUT_S"):
+        monkeypatch.delenv(name, raising=False)
+    settings = load_settings()
+    assert settings.model == "claude-opus-4-6"
+    # 事実上の無制限
+    assert settings.claude_max_turns == 1_000_000
+    assert settings.claude_timeout_s == 1_000_000

@@ -80,9 +80,9 @@ def jobs(monkeypatch) -> JobManager:
     monkeypatch.delenv("FAKE_RUNNER_EXIT", raising=False)
     manager = JobManager(runner_cmd=[sys.executable, str(FAKE_RUNNER)])
     yield manager
-    if manager.running:
-        manager.current.proc.kill()
-        manager.current.proc.wait(timeout=10)
+    for job in manager.running_jobs():
+        job.proc.kill()
+        job.proc.wait(timeout=10)
 
 
 def skill_dir(store: SkillStore, name: str) -> Path:
@@ -110,6 +110,13 @@ def make_client(password_hash, root, tmp_path, jobs, app_dir, skills):
 @pytest.fixture
 def client(make_client) -> TestClient:
     return make_client()
+
+
+@pytest.fixture
+def make_app(password_hash, root, tmp_path, jobs, app_dir, skills):
+    """同じ Web 画面に、別々のブラウザ（Cookie が別）からつなぐためのアプリ。"""
+    settings = make_settings(password_hash, root, tmp_path / "state")
+    return create_app(settings, jobs, app_dir=app_dir, skills=skills)
 
 
 def login(client: TestClient, password: str = PASSWORD):
@@ -207,12 +214,15 @@ def test_admin_only_endpoints_reject_viewers(client, method, path):
 
 
 def test_viewer_can_see_status_config_and_targets(client, monkeypatch):
+    # LLM_CONCURRENCY は廃止した（.env に残っていても使わない）。既定はサーバー全体の上限と同じ 10
     monkeypatch.setenv("LLM_CONCURRENCY", "3")
-    assert client.get("/api/status").status_code == 200
+    status = client.get("/api/status")
+    assert status.status_code == 200
+    assert status.json()["server"] == {"active_sessions": 0, "max_sessions": 10}
     assert client.get("/api/config").json() == {
         "tasks": [{"name": "doc", "label": "設計書", "type": "document"}],
         "workspace": {"repo": None, "out": None},
-        "concurrency": {"default": 3, "max": 10, "error": None},
+        "concurrency": {"default": 10, "max": 10},
     }
     assert client.get("/api/targets").status_code == 200
 
@@ -303,10 +313,12 @@ def test_second_run_is_rejected_while_running(admin, monkeypatch):
     assert "実行中" in res.json()["detail"]
 
 
-def test_settings_cannot_change_while_running(admin, repo_dir, out_dir, monkeypatch):
+def test_shared_settings_cannot_change_while_running(admin, jobs, repo_dir, root, monkeypatch):
     monkeypatch.setenv("FAKE_RUNNER_SLEEP", "30")
-    start_run(admin)
-    assert set_workspace(admin, repo_dir, out_dir).status_code == 409
+    run_id = start_run(admin).json()["run_id"]
+    # フォルダはブラウザごとなので選び直せる。実行は起動したときの出力先のまま続く
+    assert set_workspace(admin, repo_dir, root / "other_out").status_code == 200
+    assert jobs.get(run_id).out_dir == (root / "out").resolve()
     assert admin.put("/api/skills/comment", json={"files": [{"path": "SKILL.md", "content_b64": b64("x")}]}, headers=CSRF).status_code == 409
     assert admin.put("/api/targets", json={"config": {}}, headers=CSRF).status_code == 409
 
@@ -606,18 +618,95 @@ def test_run_passes_session_count_to_runner(admin, jobs):
     assert "--concurrency 10" in log
 
 
-def test_run_without_session_count_uses_env_default(admin, jobs):
+def test_run_without_session_count_uses_runner_default(admin, jobs):
     res = start_run(admin)
     wait_finished(jobs)
     assert res.json()["concurrency"] is None
     assert "--concurrency" not in admin.get(f"/api/runs/{res.json()['run_id']}/log").json()["text"]
 
 
-def test_config_reports_invalid_env_session_count(client, monkeypatch):
-    monkeypatch.setenv("LLM_CONCURRENCY", "11")
-    concurrency = client.get("/api/config").json()["concurrency"]
-    assert concurrency["default"] is None
-    assert "LLM_CONCURRENCY" in concurrency["error"]
+# --- 複数人での利用 -------------------------------------------------------------------------
+
+def browser(app, repo: Path | None = None, out: Path | None = None) -> TestClient:
+    """別のブラウザ（Cookie が別）として、ログインしてフォルダを選ぶ。"""
+    client = TestClient(app)
+    assert login(client).status_code == 200
+    if repo and out:
+        assert set_workspace(client, repo, out).status_code == 200
+    return client
+
+
+def test_folders_are_remembered_per_browser(make_app, repo_dir, root):
+    alice = browser(make_app, repo_dir, root / "out_a")
+    # まだ選んでいないブラウザには、最後に選ばれたフォルダが初期値として出る
+    bob = browser(make_app)
+    assert bob.get("/api/config").json()["workspace"]["out"] == str((root / "out_a").resolve())
+
+    assert set_workspace(bob, repo_dir, root / "out_b").status_code == 200
+    assert bob.get("/api/config").json()["workspace"]["out"] == str((root / "out_b").resolve())
+    assert alice.get("/api/config").json()["workspace"]["out"] == str((root / "out_a").resolve())
+
+
+def test_people_can_run_on_different_outputs_at_the_same_time(make_app, jobs, repo_dir, root, monkeypatch):
+    monkeypatch.setenv("FAKE_RUNNER_SLEEP", "30")
+    alice = browser(make_app, repo_dir, root / "out_a")
+    bob = browser(make_app, repo_dir, root / "out_b")
+
+    a = start_run(alice)
+    b = start_run(bob)
+    assert (a.status_code, b.status_code) == (202, 202)
+    assert len(jobs.running_jobs()) == 2
+
+    # それぞれの画面には自分の出力先の実行が出て、他の人の実行は一覧で分かる
+    status = alice.get("/api/status").json()
+    assert status["job"]["run_id"] == a.json()["run_id"]
+    assert [o["run_id"] for o in status["others"]] == [b.json()["run_id"]]
+    # 実行中の他の人の出力先のログも読める
+    assert alice.get(f"/api/runs/{b.json()['run_id']}/log").status_code == 200
+
+    # 同じ出力先では同時に実行できない
+    carol = browser(make_app, repo_dir, root / "out_a")
+    res = start_run(carol)
+    assert res.status_code == 409
+    assert "この出力先では実行中" in res.json()["detail"]
+
+    # 停止は自分の実行だけに効く
+    assert bob.post("/api/runs/stop", headers=CSRF).json()["run_id"] == b.json()["run_id"]
+    jobs.get(b.json()["run_id"]).proc.wait(timeout=20)
+    assert jobs.get(a.json()["run_id"]).running
+
+
+def test_stop_by_run_id(make_app, jobs, repo_dir, root, monkeypatch):
+    monkeypatch.setenv("FAKE_RUNNER_SLEEP", "30")
+    alice = browser(make_app, repo_dir, root / "out_a")
+    run_id = start_run(alice).json()["run_id"]
+    other = browser(make_app, repo_dir, root / "out_b")
+
+    res = other.post("/api/runs/stop", json={"run_id": run_id}, headers=CSRF)
+    assert res.status_code == 200
+    assert res.json()["stop_requested"] is True
+    assert other.post("/api/runs/stop", json={"run_id": "web-unknown"}, headers=CSRF).status_code == 409
+
+
+def test_shared_settings_are_locked_while_anyone_runs(make_app, repo_dir, root, monkeypatch):
+    # スキル・対象の設定は全員で共有するため、誰かが実行中なら変えられない。フォルダは自分の出力先が空いていれば変えられる
+    monkeypatch.setenv("FAKE_RUNNER_SLEEP", "30")
+    alice = browser(make_app, repo_dir, root / "out_a")
+    start_run(alice)
+    bob = browser(make_app, repo_dir, root / "out_b")
+    assert bob.put("/api/targets", json={"config": {}}, headers=CSRF).status_code == 409
+    assert set_workspace(bob, repo_dir, root / "out_c").status_code == 200
+
+
+def test_number_of_simultaneous_runs_is_limited(make_app, jobs, repo_dir, root, monkeypatch):
+    from godoc_agent.web import jobs as jobs_module
+
+    monkeypatch.setattr(jobs_module, "MAX_RUNNING_JOBS", 1)
+    monkeypatch.setenv("FAKE_RUNNER_SLEEP", "30")
+    assert start_run(browser(make_app, repo_dir, root / "out_a")).status_code == 202
+    res = start_run(browser(make_app, repo_dir, root / "out_b"))
+    assert res.status_code == 409
+    assert "1 件まで" in res.json()["detail"]
 
 
 async def write_board(out_dir: Path, run_id: str, concurrency: int, busy: list[str]) -> tuple[SessionBoard, AsyncExitStack]:

@@ -1,15 +1,22 @@
 """画面で選んだ対象フォルダ（--repo）と出力先フォルダ（--out）の保存と、フォルダ選択ダイアログ用の一覧。
 
 どちらも WEB_BROWSE_ROOTS の下からしか選べない（任意のパスを runner に渡させないため）。
+
+複数人が同時に使えるよう、選んだフォルダはブラウザごと（Cookie の利用者ID ごと）に
+`<state>/workspaces/<利用者ID>.json` へ保存する。まだ選んでいないブラウザには、共有の既定値
+（`<state>/workspace.json`。最後にどこかのブラウザで選ばれたフォルダ）を表示する。
 """
 
 import json
+import re
 import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 # ダイアログに一度に返すフォルダ数の上限（巨大なフォルダで応答が重くならないように）
 MAX_ENTRIES = 1000
+# 利用者ID（Cookie）の形式。ファイル名に使うため、これ以外は受け付けない
+CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
 
 
 @dataclass(frozen=True)
@@ -20,30 +27,49 @@ class Workspace:
 
 class WorkspaceStore:
     def __init__(self, state_dir: Path, browse_roots: tuple[Path, ...]):
-        self.path = state_dir / "workspace.json"
+        self.path = state_dir / "workspace.json"  # 共有の既定値
+        self.clients_dir = state_dir / "workspaces"
         self.roots = browse_roots
         self._lock = threading.Lock()
 
-    def get(self) -> Workspace:
-        if not self.path.is_file():
-            return Workspace()
+    def _path_for(self, client_id: str | None) -> Path:
+        if client_id is None:
+            return self.path
+        if not CLIENT_ID_RE.match(client_id):
+            raise ValueError(f"利用者IDが正しくありません: {client_id!r}")
+        return self.clients_dir / f"{client_id}.json"
+
+    @staticmethod
+    def _read(path: Path) -> Workspace | None:
+        if not path.is_file():
+            return None
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8"))
             return Workspace(repo=data.get("repo"), out=data.get("out"))
         except (json.JSONDecodeError, AttributeError):
-            return Workspace()
+            return None
 
-    def set(self, repo: str, out: str) -> Workspace:
+    def get(self, client_id: str | None = None) -> Workspace:
+        """そのブラウザで選んだフォルダ。まだ選んでいなければ共有の既定値。"""
+        if client_id is not None and (own := self._read(self._path_for(client_id))) is not None:
+            return own
+        return self._read(self.path) or Workspace()
+
+    def set(self, repo: str, out: str, client_id: str | None = None) -> Workspace:
         repo_path = self.check_repo(repo)
         out_path = self.check_out(out)
         if repo_path == out_path or out_path.is_relative_to(repo_path):
             raise ValueError("出力先は対象フォルダの外にしてください（生成物が次回の対象に混ざるのを防ぐため）")
         workspace = Workspace(repo=str(repo_path), out=str(out_path))
+        # 最後に選ばれたフォルダを共有の既定値にもする（まだ選んでいないブラウザの初期値・
+        # フォルダの記録がない以前の定期実行の設定で使う。以前の版と同じ動き）
+        paths = dict.fromkeys([self._path_for(client_id), self.path])
         with self._lock:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(asdict(workspace), ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp.replace(self.path)
+            for path in paths:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(asdict(workspace), ensure_ascii=False, indent=2), encoding="utf-8")
+                tmp.replace(path)
         return workspace
 
     # --- 検証 ---------------------------------------------------------------------------

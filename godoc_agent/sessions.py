@@ -1,7 +1,8 @@
 """同時に動く Claude Code のセッション（枠）の割り当てと、その状況の記録。
 
-runner は同時セッション数（LLM_CONCURRENCY・--concurrency）の数だけ「枠」を用意し、
-1ファイル×1タスクの処理を空いた枠に割り当てる。どの枠で何を処理しているか・各枠の直近の出来事を
+runner は同時セッション数（--concurrency。既定は config.DEFAULT_CONCURRENCY）の数だけ「枠」を用意し、
+1ファイル×1タスクの処理を空いた枠に割り当てる。さらに、サーバー全体の枠（slots.py。全実行の合計で最大10）も
+1つ取ってから処理を始めるため、複数の実行が同時に動いても推論サーバーへの同時セッションは合計10を超えない。どの枠で何を処理しているか・各枠の直近の出来事を
 `<out>/_runs/<run_id>.sessions.json` に書き出し、Web 画面はそれを読んで枠の占有状況とセッションごとのログを表示する。
 同じ出来事は `[S01] ...` の形で標準出力（Web から起動した場合は実行ログ）にも出す。
 """
@@ -17,6 +18,8 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+
+from .slots import GlobalSlots
 
 SESSIONS_SUFFIX = ".sessions.json"
 # 1つの枠について残す直近の出来事の数（ファイルが際限なく大きくならないように）
@@ -84,6 +87,7 @@ class SessionBoard:
     def __init__(
         self, path: Path, run_id: str, concurrency: int, total: int,
         *, echo: Callable[[str], None] | None = None, clock: Callable[[], float] = time.time,
+        global_slots: GlobalSlots | None = None,
     ):
         if concurrency < 1:
             raise ValueError(f"同時セッション数は1以上で指定してください: {concurrency}")
@@ -95,6 +99,7 @@ class SessionBoard:
         self._running = True
         self._echo = echo or (lambda line: print(line, flush=True))
         self._clock = clock
+        self._global_slots = global_slots
         self._slots = [_Slot(i) for i in range(1, concurrency + 1)]
         self._free: asyncio.Queue[int] = asyncio.Queue()
         for slot in self._slots:
@@ -107,17 +112,27 @@ class SessionBoard:
         """空いた枠を1つ占有する。空きがなければ空くまで待つ。"""
         number = await self._free.get()
         slot = self._slots[number - 1]
-        slot.task, slot.rel_path, slot.attempt = task, rel_path, 0
-        slot.started_at, slot.started_ts = _now_iso(), self._clock()
+        global_slot = None
         try:
-            self._event(slot, f"開始 {task} {rel_path}")
-            yield Session(self, slot)
+            if self._global_slots is not None:
+                limit = self._global_slots.limit
+                global_slot = await self._global_slots.acquire(on_wait=lambda: self._event(
+                    slot, f"待機 サーバー全体の同時セッション数が上限（{limit}）のため空きを待ちます（{task} {rel_path}）",
+                ))
+            slot.task, slot.rel_path, slot.attempt = task, rel_path, 0
+            slot.started_at, slot.started_ts = _now_iso(), self._clock()
+            try:
+                self._event(slot, f"開始 {task} {rel_path}")
+                yield Session(self, slot)
+            finally:
+                slot.task = slot.rel_path = slot.started_at = slot.started_ts = None
+                slot.attempt = 0
+                slot.handled += 1
+                self._finished += 1
+                self._write()
         finally:
-            slot.task = slot.rel_path = slot.started_at = slot.started_ts = None
-            slot.attempt = 0
-            slot.handled += 1
-            self._finished += 1
-            self._write()
+            if global_slot is not None:
+                global_slot.release()
             self._free.put_nowait(number)
 
     def __enter__(self) -> "SessionBoard":

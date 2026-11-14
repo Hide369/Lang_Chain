@@ -5,7 +5,8 @@
 何を生成し、どう検証するかはタスク（tasks.Task）が決める。
 
 prepare -> generate -> validate -+-> (done)
-                ^                |
+                ^   |            |
+                |   +-> (context_overflow: コンテキスト超過。再試行せずにスキップ)
                 +---- retry -----+-> (failed)
 """
 
@@ -18,12 +19,15 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
 from .analyzers import extract_facts
+from .claude_code import ContextOverflowError
 from .tasks import Task
 
 # ```markdown / ```go / ```csharp などで全体が囲まれていたら外す
 _FENCE_RE = re.compile(r"^```[\w-]*\s*\n(.*)\n```\s*$", re.DOTALL)
 
-Status = Literal["pending", "done", "too_large", "failed_validation"]
+Status = Literal["pending", "done", "too_large", "context_overflow", "failed_validation"]
+# 入力が大きすぎて処理できなかった（失敗ではなく、警告付きでスキップする）状態
+SKIPPED_STATUSES = frozenset({"too_large", "context_overflow"})
 
 
 class ChatModel(Protocol):
@@ -114,6 +118,12 @@ def build_doc_graph(llm: ChatModel, task: Task, *, max_attempts: int) -> StateGr
         started = time.perf_counter()
         try:
             response = await llm.ainvoke(state["messages"])
+        except ContextOverflowError as e:
+            # Claude Code がファイルを読み進めるうちに入力がコンテキストを超えた。同じ入力で再生成しても
+            # 超えるだけなので、このファイルは警告付きでスキップし、バッチ（と推論サーバー）は止めない
+            if observer:
+                observer.log(f"生成 {attempt} 回目がコンテキスト超過のためスキップ: {e}"[:500])
+            return {"status": "context_overflow", "issues": [str(e)], "attempts": attempt}
         except Exception as e:
             if observer:
                 observer.log(f"生成 {attempt} 回目が失敗: {type(e).__name__}: {e}"[:500])
@@ -154,6 +164,6 @@ def build_doc_graph(llm: ChatModel, task: Task, *, max_attempts: int) -> StateGr
     graph.add_node("validate", validate)
     graph.add_edge(START, "prepare")
     graph.add_conditional_edges("prepare", generate_or_end, ["generate", END])
-    graph.add_edge("generate", "validate")
+    graph.add_conditional_edges("generate", lambda s: "validate" if s["status"] == "pending" else END, ["validate", END])
     graph.add_conditional_edges("validate", generate_or_end, ["generate", END])
     return graph

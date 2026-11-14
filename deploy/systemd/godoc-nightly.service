@@ -10,9 +10,8 @@ After=network-online.target
 Type=oneshot
 # 設置時に実行ユーザーへ置き換える（README「定期実行」参照）。Goリポジトリの git pull ができるユーザーにすること
 User=REPLACE_WITH_USER
-Environment=GODOC_REPO=/srv/repos/myapp
-# 出力先を変える場合（既定: /opt/Lang_Chain/out）
-#Environment=GODOC_OUT=/opt/Lang_Chain/out
+# 設定（対象リポジトリ GODOC_REPO・出力先 GODOC_OUT を含む）はすべて /opt/Lang_Chain/.env に書く。
+# ここに Environment= を書かないこと（設定の置き場所が2か所になり、.env を直しても反映されなくなる）
 ExecStart=/opt/Lang_Chain/deploy/nightly.sh
 # 全件の生成は長時間かかるが、ハングしたまま翌日の実行を妨げないよう上限を設ける
 TimeoutStartSec=12h

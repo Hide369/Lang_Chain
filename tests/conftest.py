@@ -105,6 +105,16 @@ class FakeClaude:
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
+@pytest.fixture(autouse=True)
+def isolated_global_slots(tmp_path: Path, monkeypatch) -> Path:
+    """サーバー全体のセッション枠のロックファイルを、リポジトリの state/ ではなくテストごとの一時フォルダに置く。"""
+    from godoc_agent import slots
+
+    directory = tmp_path / "llm_slots"
+    monkeypatch.setattr(slots, "DEFAULT_SLOTS_DIR", directory)
+    return directory
+
+
 @pytest.fixture
 def fake_claude(tmp_path: Path, monkeypatch) -> FakeClaude:
     state_dir = tmp_path / "fake_claude"
