@@ -734,7 +734,7 @@ async function fileToBase64(file) {
   return btoa(binary);
 }
 
-async function uploadSkill(name, fileList, fromFolder, type = null) {
+async function uploadSkill(name, fileList, fromFolder, type = null, label = null) {
   const files = [];
   for (const file of fileList) {
     // フォルダを選ぶと「選んだフォルダ名/…」の形で届くので、先頭のフォルダ名を外す
@@ -742,7 +742,7 @@ async function uploadSkill(name, fileList, fromFolder, type = null) {
     files.push({ path, content_b64: await fileToBase64(file) });
   }
   if (fromFolder && !files.some((f) => f.path === "SKILL.md")) throw new Error("選んだフォルダの直下に SKILL.md がありません");
-  return send("PUT", `/api/skills/${encodeURIComponent(name)}`, { files, type });
+  return send("PUT", `/api/skills/${encodeURIComponent(name)}`, { files, type, label });
 }
 
 function adminButton(text, onclick, cls = "") {
@@ -809,6 +809,18 @@ function renderSkill(info, types) {
       && act(() => send("DELETE", `/api/skills/${encodeURIComponent(info.name)}`), "登録を外しました"), "danger"));
   }
 
+  // 追加のスキルは表示名（プルダウンなどに出す名前）を変えられる
+  let labelRow = null;
+  if (!info.builtin) {
+    const labelInput = el("input", { type: "text", value: info.display_name || "", placeholder: "例: テスト仕様書",
+      maxLength: 40, style: "width:200px" });
+    labelInput.dataset.admin = "";
+    labelRow = el("div", { className: "row" },
+      el("span", { className: "label", textContent: "表示名" }), labelInput,
+      adminButton("表示名を変更", () => act(() => send("PUT", `/api/skills/${encodeURIComponent(info.name)}/label`,
+        { label: labelInput.value }), "表示名を変更しました")));
+  }
+
   const status = info.registered
     ? badge("登録済み", "ok")
     : badge(info.name === "doc" ? "未登録（設計書は実行できません）" : "未登録", info.name === "doc" ? "fail" : "idle");
@@ -819,6 +831,7 @@ function renderSkill(info, types) {
       info.updated_at ? el("span", { className: "muted small", textContent: `更新 ${fmtTime(info.updated_at)}` }) : null),
     el("div", { className: "muted small mono", textContent: `スキル: ${info.dir}` }),
     el("div", { className: "muted small mono", textContent: `出力: ${outDir}`, style: "margin-bottom:8px" }),
+    labelRow,
     info.files.length ? el("div", { className: "scroll", style: "max-height:160px;margin-bottom:10px" },
       el("table", {}, el("tbody", {}, ...info.files.map((f) => el("tr", {},
         el("td", { className: "mono", textContent: f.path }),
@@ -832,6 +845,8 @@ function renderSkill(info, types) {
 function renderNewSkill(types) {
   const name = el("input", { type: "text", placeholder: "例: test-spec", maxLength: 40, style: "width:200px" });
   name.dataset.admin = "";
+  const label = el("input", { type: "text", placeholder: "例: テスト仕様書（省略可）", maxLength: 40, style: "width:200px" });
+  label.dataset.admin = "";
   const type = el("select", {}, el("option", { value: "", textContent: "出力の種類を選択" }),
     ...types.map((t) => el("option", { value: t.type, textContent: t.label })));
   type.dataset.admin = "";
@@ -844,9 +859,10 @@ function renderNewSkill(types) {
     try {
       msg.className = "small";
       msg.textContent = "処理中…";
-      await uploadSkill(name.value, files, fromFolder, type.value);
+      await uploadSkill(name.value, files, fromFolder, type.value, label.value);
       const added = name.value;
       name.value = "";
+      label.value = "";
       type.value = "";
       await afterSkillChange(added, "追加しました");
     } catch (err) {
@@ -860,13 +876,16 @@ function renderNewSkill(types) {
   return el("section", { className: "wide" },
     el("h2", { textContent: "スキルを追加" }),
     el("p", { className: "muted small", style: "margin-top:0",
-      textContent: "名前は実行時に選ぶ名前と、出力先のフォルダ名（<出力先>/_<名前>/）になります。"
+      textContent: "スキル名はサーバー上のフォルダ名（skills/<スキル名>/）と出力先のフォルダ名（<出力先>/_<スキル名>/）になります。"
+        + "表示名（日本語可・省略可）は実行・定期実行のスキル選択に表示する名前です。省略するとスキル名を表示します。"
         + "文書: ファイルごとに Markdown を作り、前回の出力を引き継いで改訂させます。"
         + "コメントだけ変更: コメント以外のコードが変わっていたら不合格にします。"
         + "コードも変更: 本文が空でないことだけを確かめます（取り込むかどうかは差分を見て判断してください）。" }),
     el("div", { className: "row" },
       el("span", { className: "label", textContent: "スキル名" }), name,
       el("span", { className: "label", textContent: "出力の種類", style: "width:auto" }), type),
+    el("div", { className: "row" },
+      el("span", { className: "label", textContent: "表示名" }), label),
     el("div", { className: "row" },
       el("span", { className: "label" }),
       adminButton("フォルダを選んで追加", pick(folderInput), "primary"),

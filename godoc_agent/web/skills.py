@@ -3,7 +3,7 @@
 runner が読む場所にそのまま置くので、Web 画面以外（夜間バッチ・コマンド）からの実行でも同じスキルが使われる。
   設計書（doc）       … CLAUDE_SKILL_PATH のフォルダ、未設定なら skills/design-doc-batch/
   コメント追記（comment） … CLAUDE_COMMENT_SKILL_PATH のフォルダ、未設定なら skills/comment-batch/
-  追加のスキル          … skills/<スキル名>/。名前と出力の種類は skills/registry.json に記録する
+  追加のスキル          … skills/<スキル名>/。名前・出力の種類・表示名は skills/registry.json に記録する
 入れ替えは一時フォルダに書き終えてから差し替え、直前のスキルは <フォルダ名>.prev に1世代だけ残す。
 """
 
@@ -22,7 +22,9 @@ from ..skill_registry import (
     custom_skill,
     find_skill,
     list_skills,
+    read_labels,
     read_registry,
+    validate_label,
     validate_name,
     write_registry,
 )
@@ -79,6 +81,7 @@ class SkillStore:
         return {
             "name": skill.name,
             "label": skill.label,
+            "display_name": skill.display_name,
             "type": skill.output_type,
             "type_label": OUTPUT_TYPE_LABELS[skill.output_type],
             "builtin": skill.builtin,
@@ -101,24 +104,46 @@ class SkillStore:
 
     # --- 変更 ---------------------------------------------------------------------------
 
-    def install(self, name: str, files: list[SkillFile], output_type: str | None = None) -> dict:
-        """スキルを登録する（同じ名前があれば入れ替える）。追加のスキルは出力の種類も記録する。"""
+    def install(
+        self, name: str, files: list[SkillFile], output_type: str | None = None, label: str | None = None,
+    ) -> dict:
+        """スキルを登録する（同じ名前があれば入れ替える）。追加のスキルは出力の種類と表示名も記録する。
+
+        label を省略（None）すると、入れ替えでは前の表示名のまま。空文字なら表示名を消す。
+        """
         checked = self._validate(files)
         with self._lock:
             entries = read_registry(self.app_dir)
+            labels = read_labels(self.app_dir)
             if name in (DOC, COMMENT):
                 skill = self.get(name)
                 if output_type not in (None, skill.output_type):
                     raise ValueError(f"{skill.label}スキルの出力の種類は変えられません")
+                if label:
+                    raise ValueError(f"{skill.label}スキルの表示名は変えられません")
             else:
                 validate_name(name)
                 output_type = output_type or entries.get(name)
                 if output_type not in OUTPUT_TYPES:
                     raise ValueError("出力の種類（文書・コメントだけ変更・コードも変更）を選んでください")
-                skill = custom_skill(self.app_dir, name, output_type)
+                if label is not None:
+                    labels[name] = validate_label(label)
+                skill = custom_skill(self.app_dir, name, output_type, labels.get(name, ""))
             self._write_files(skill.skill_dir, checked)
-            if not skill.builtin and entries.get(name) != output_type:
-                write_registry(self.app_dir, {**entries, name: output_type})
+            if not skill.builtin and (entries.get(name) != output_type or label is not None):
+                write_registry(self.app_dir, {**entries, name: output_type}, labels)
+        return self.info(self.get(name))
+
+    def set_label(self, name: str, label: str) -> dict:
+        """追加のスキルの表示名だけを変える（SKILL.md はそのまま）。空文字なら表示名を消す。"""
+        with self._lock:
+            skill = self.get(name)
+            if skill.builtin:
+                raise ValueError(f"{skill.label}スキルの表示名は変えられません")
+            entries = read_registry(self.app_dir)
+            labels = read_labels(self.app_dir)
+            labels[name] = validate_label(label)
+            write_registry(self.app_dir, entries, labels)
         return self.info(self.get(name))
 
     def remove(self, name: str) -> None:
@@ -135,7 +160,7 @@ class SkillStore:
             if not skill.builtin:
                 entries = read_registry(self.app_dir)
                 entries.pop(name, None)
-                write_registry(self.app_dir, entries)
+                write_registry(self.app_dir, entries, read_labels(self.app_dir))
 
     def restore(self, name: str) -> dict:
         """直前のスキル（.prev）に戻す。今のスキルは .prev に回る。"""
