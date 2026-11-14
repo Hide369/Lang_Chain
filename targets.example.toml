@@ -1,7 +1,7 @@
 # 処理対象の言語・フォルダ・ファイル・除外の設定。
 # 変更するときは targets.toml にコピーして編集する（targets.toml はコミットしない）。
 # targets.toml がなければこのファイルが使われる。別の場所に置く場合は .env の TARGETS_CONFIG にパスを書く。
-# 書き方は docs/target_files.md を参照。
+# 書き方は docs/other/target_files.md を参照。
 #
 # パターンは --repo からの相対パス（/ 区切り）と照合する glob 形式:
 #   *  … / を含まない任意の文字列   ?  … / 以外の1文字

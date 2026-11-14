@@ -1,7 +1,7 @@
 # 処理ワークフロー
 
 runner（`python -m godoc_agent.runner`）を1回起動したときに、内部で何がどの順番で行われるかをまとめる。
-セットアップ・運用コマンドは [README](../README.md) を参照。
+セットアップ・運用コマンドは [README](../../README.md) を参照。
 
 ## 全体像
 

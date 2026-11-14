@@ -30,7 +30,7 @@ def _toml_list(values: list[str]) -> str:
 
 def to_toml(data: dict) -> str:
     lines = [
-        "# 処理対象の言語・フォルダ・ファイル・除外の設定（Web 画面から保存）。書き方は docs/target_files.md を参照。",
+        "# 処理対象の言語・フォルダ・ファイル・除外の設定（Web 画面から保存）。書き方は docs/other/target_files.md を参照。",
         "# 手で編集してもよいが、画面から保存し直すとコメントは消える。",
         "",
         "# すべての言語に共通の除外",

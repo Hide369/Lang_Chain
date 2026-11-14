@@ -18,7 +18,7 @@ runner は常駐サービスではなく、起動すると対象ファイルを�
 - チェックポイントは使わない。中断・失敗しても再実行すれば、完了済みのファイルは差分スキップで飛ばされ、残りが最初から処理される
 - ソースのハッシュをタスクごとに記録し（設計書は `out/.manifest.json`、コメント追記は `out/_commented/.manifest.json`）、変更のないファイルは次回以降スキップする
 - 設計書の構成・書き方は SKILL.md に任せる。検証するのは、本文が空でないことと、公開識別子（静的解析で抽出）がすべて記載されていることだけ
-- 処理対象の言語・フォルダ・ファイル・除外は設定ファイル `targets.toml`（なければ [targets.example.toml](targets.example.toml)）で決める。対応言語は Go・C#・TypeScript（[docs/target_files.md](docs/target_files.md)）
+- 処理対象の言語・フォルダ・ファイル・除外は設定ファイル `targets.toml`（なければ [targets.example.toml](targets.example.toml)）で決める。対応言語は Go・C#・TypeScript（[docs/other/target_files.md](docs/other/target_files.md)）
 - 設計書スキルはすべての言語で共通の `skills/design-doc-batch/SKILL.md` を使う。言語ごとに変わるのはプロンプト中の言語名と、公開識別子の抽出方法だけ
 - 既定（targets.example.toml）の対象は **`<xx>_api/pkg/handler/` 配下（サブディレクトリを含む）のGoファイルだけ**（`xx` は任意）
   - `--repo` には、複数の `xx_api` を含む親ディレクトリと、`xx_api` 自体のどちらを指定してもよい（複数の API を扱うなら親ディレクトリを推奨。「3. 設計書を取得する」の注意を参照）
@@ -54,11 +54,11 @@ generate の中身（ファイルごと）:
 | [godoc_agent/source_common.py](godoc_agent/source_common.py) | 言語に共通する字句の分割と、コメント以外の差分検出 |
 | [godoc_agent/preflight.py](godoc_agent/preflight.py) | 開始前の推論サーバー接続・モデル存在チェック（OpenAI 互換の `/v1/models`。vLLM・Ollama の両方で動く） |
 
-起動から終了までの処理の流れ（検証・保存・終了コードなど）は [docs/workflow.md](docs/workflow.md) にまとめている。
-処理対象の言語・フォルダ・ファイル・除外を変える手順は [docs/target_files.md](docs/target_files.md) にまとめている。
-処理が遅いときの切り分け（原因の候補・計測ログの集計方法・関係する設定）は [docs/performance_troubleshooting.md](docs/performance_troubleshooting.md) にまとめている。
-対象フォルダをネットワーク上の NAS にする手順（マウント・サービスの設定・git pull・元に戻す方法）は [docs/nas_target.md](docs/nas_target.md) にまとめている。
-サーバーの更新手順書は、作成日（PR のマージ日）ごとに `docs/pr<最初のPR番号>-<最後のPR番号>/` にまとめている（その日のPRが1件なら `docs/pr<番号>/`）。仕様・使い方の文書は `docs/` 直下に置く。
+起動から終了までの処理の流れ（検証・保存・終了コードなど）は [docs/other/workflow.md](docs/other/workflow.md) にまとめている。
+処理対象の言語・フォルダ・ファイル・除外を変える手順は [docs/other/target_files.md](docs/other/target_files.md) にまとめている。
+処理が遅いときの切り分け（原因の候補・計測ログの集計方法・関係する設定）は [docs/other/performance_troubleshooting.md](docs/other/performance_troubleshooting.md) にまとめている。
+対象フォルダをネットワーク上の NAS にする手順（マウント・サービスの設定・git pull・元に戻す方法）は [docs/other/nas_target.md](docs/other/nas_target.md) にまとめている。
+サーバーの更新手順書は、作成日（PR のマージ日）ごとに `docs/pr<最初のPR番号>-<最後のPR番号>/` にまとめている（その日のPRが1件なら `docs/pr<番号>/`）。それ以外の仕様・使い方の文書は `docs/other/` に置く。
 以前の版（Go 専用）からサーバーを入れ替える手順は [docs/pr18-22/migration_multi_language.md](docs/pr18-22/migration_multi_language.md) にまとめている。
 チェックポイント廃止・再生成の見直し版（PR #21）への入れ替え手順は [docs/pr18-22/migration_drop_checkpointer.md](docs/pr18-22/migration_drop_checkpointer.md) にまとめている。
 Web 画面版（PR #23・#24）への入れ替え手順（夜間タイマーからの切り替え・GitLab の認証を含む）は [docs/pr23-25/migration_web_ui.md](docs/pr23-25/migration_web_ui.md) にまとめている。
@@ -88,7 +88,7 @@ pip install -r requirements.txt
 cp .env.example .env  # LLM_MODEL などを編集（LLM_MODEL は --served-model-name、LLM_NUM_CTX は --max-model-len と同じ値にする）
 
 # 4. 既存のスキルをサーバーに置く（参照ファイルがあればフォルダごと）
-#    Web 画面を使う場合は、ここでは置かずに、画面の「スキル」タブからクライアント PC のフォルダを選んで登録する（docs/web_ui.md）
+#    Web 画面を使う場合は、ここでは置かずに、画面の「スキル」タブからクライアント PC のフォルダを選んで登録する（docs/other/web_ui.md）
 #    Web 画面を使わない場合は、スキルのフォルダを USB メモリや NAS などで GB10 に持ってきてからコピーする
 #    設計書スキルは skills/design-doc-batch/ に置く（フォルダ名を design-doc-batch にする。.env での指定は不要）
 cp -r <持ってきたフォルダ>/design-doc-batch /opt/Batch_Exec/skills/
@@ -236,7 +236,7 @@ GB10 上で Web 画面を常駐させると、クライアント PC のブラウ
 複数人が同時に使える。対象・出力先フォルダはブラウザごとに選び、出力先が違えば同時に実行できる（Claude Code のセッションはサーバー全体で合計10まで）。
 同じ出力先では、Web 画面・コマンド・夜間タイマーの間でも同時に1つしか動かない（runner が出力先ごとにロックを取る）。
 この版への更新手順は [docs/pr40-42/migration_multi_user.md](docs/pr40-42/migration_multi_user.md)。
-設置・使い方・セキュリティ上の注意は [docs/web_ui.md](docs/web_ui.md) にまとめている。
+設置・使い方・セキュリティ上の注意は [docs/other/web_ui.md](docs/other/web_ui.md) にまとめている。
 
 ## 運用（GB10 の端末と Web 画面）
 
@@ -263,9 +263,9 @@ Pythonファイルを置くだけでは動かない。最初に1回だけ、次�
 | Claude Code のインストール | 不要 |
 | このリポジトリの clone、venv 作成、`pip install` | `/opt` 配下なら要 |
 | `.env` の作成（`CLAUDE_BIN` など） | 不要 |
-| Web 画面の設置（[docs/web_ui.md](docs/web_ui.md)） | 要 |
+| Web 画面の設置（[docs/other/web_ui.md](docs/other/web_ui.md)） | 要 |
 | SKILL.md（設計書・コメント追記）の配置（Web 画面の「スキル」タブから登録できる） | 不要 |
-| Goリポジトリの clone（HTTPS）と、パスワードなしで `git pull` できる設定（アクセストークン。[docs/web_ui.md](docs/web_ui.md#gitlab-の認証https-とアクセストークン)） | 不要 |
+| Goリポジトリの clone（HTTPS）と、パスワードなしで `git pull` できる設定（アクセストークン。[docs/other/web_ui.md](docs/other/web_ui.md#gitlab-の認証https-とアクセストークン)） | 不要 |
 | GB10 のスリープ無効化（「端末を閉じてよいか」参照） | 要 |
 | 定期実行の設定（使う場合。Web 画面の「定期実行」か「定期実行（systemd タイマー）」） | タイマーなら要 |
 
@@ -297,7 +297,7 @@ Pythonファイルを置くだけでは動かない。最初に1回だけ、次�
 置き方:
 
 - **git（推奨）**：サーバーで `git clone`（HTTPS）し、実行前に `git pull` する。どのコミットから生成したかが明確になる
-- **NAS**：NAS 上のフォルダを GB10 にマウントして対象にする（[docs/nas_target.md](docs/nas_target.md)）
+- **NAS**：NAS 上のフォルダを GB10 にマウントして対象にする（[docs/other/nas_target.md](docs/other/nas_target.md)）
 - **持ち込み**：未コミットの変更も対象にしたい場合は、USB メモリなどで GB10 に持ってきてコピーする（SSH を使う `rsync` / `scp` は使えない）
 
 ### 2. 端末を閉じても止まらないように起動する
@@ -380,12 +380,12 @@ tmux / nohup で起動していれば、**起動後は端末を閉じて GB10 �
 クライアントへの取得方法（SSH を使う `scp` は使えない）:
 
 - **Web 画面**：生成物の一覧からファイルを選び、「ダウンロード」で保存する（1ファイルずつ）
-- **NAS**：GB10 に NAS をマウントしていれば、出力先を NAS へコピーし、クライアント PC からは NAS の共有フォルダで受け取る（[docs/nas_target.md の「生成物を NAS にも置きたい場合」](docs/nas_target.md#8-生成物を-nas-にも置きたい場合)）
+- **NAS**：GB10 に NAS をマウントしていれば、出力先を NAS へコピーし、クライアント PC からは NAS の共有フォルダで受け取る（[docs/other/nas_target.md の「生成物を NAS にも置きたい場合」](docs/other/nas_target.md#8-生成物を-nas-にも置きたい場合)）
 - **git**：`--out /srv/repos/myapp/docs/design` のようにGoリポジトリ内へ出力し、サーバーでコミット・push すれば、クライアントは `git pull` で受け取れる（push には書き込み権限のあるトークンが必要。読み取り専用のトークンとは分ける）
 
 ## 定期実行（systemd タイマー）
 
-> Web 画面を使う場合は、画面の「定期実行」で同じことができる（時刻などを画面から変えられる）。その場合はこのタイマーは設置しない（設置済みなら `sudo systemctl disable --now godoc-nightly.timer` で止める）。詳しくは [docs/web_ui.md](docs/web_ui.md) を参照。
+> Web 画面を使う場合は、画面の「定期実行」で同じことができる（時刻などを画面から変えられる）。その場合はこのタイマーは設置しない（設置済みなら `sudo systemctl disable --now godoc-nightly.timer` で止める）。詳しくは [docs/other/web_ui.md](docs/other/web_ui.md) を参照。
 
 毎晩決まった時刻に、Goリポジトリを `git pull` してから設計書を生成する。変更のないファイルはスキップされるため、毎日実行しても処理されるのは変更されたファイルだけ。
 
@@ -406,7 +406,7 @@ cd /opt/Batch_Exec
 which claude          # 例: /home/<ユーザー>/.local/bin/claude → CLAUDE_BIN=/home/<ユーザー>/.local/bin/claude
 
 # 2. 実行ユーザーで、Goリポジトリの git pull がパスワード入力なしでできることを確認する
-#    （HTTPS とアクセストークン。設定方法は docs/web_ui.md の「GitLab の認証（HTTPS とアクセストークン）」）
+#    （HTTPS とアクセストークン。設定方法は docs/other/web_ui.md の「GitLab の認証（HTTPS とアクセストークン）」）
 git -C /srv/repos/myapp pull --ff-only
 
 # 3. 手動でスクリプトを試す
