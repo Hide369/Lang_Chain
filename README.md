@@ -58,20 +58,21 @@ generate の中身（ファイルごと）:
 処理対象の言語・フォルダ・ファイル・除外を変える手順は [docs/target_files.md](docs/target_files.md) にまとめている。
 処理が遅いときの切り分け（原因の候補・計測ログの集計方法・関係する設定）は [docs/performance_troubleshooting.md](docs/performance_troubleshooting.md) にまとめている。
 対象フォルダをネットワーク上の NAS にする手順（マウント・サービスの設定・git pull・元に戻す方法）は [docs/nas_target.md](docs/nas_target.md) にまとめている。
-以前の版（Go 専用）からサーバーを入れ替える手順は [docs/migration_multi_language.md](docs/migration_multi_language.md) にまとめている。
-チェックポイント廃止・再生成の見直し版（PR #21）への入れ替え手順は [docs/migration_drop_checkpointer.md](docs/migration_drop_checkpointer.md) にまとめている。
-Web 画面版（PR #23・#24）への入れ替え手順（夜間タイマーからの切り替え・GitLab の認証を含む）は [docs/migration_web_ui.md](docs/migration_web_ui.md) にまとめている。
-Ollama を止めて vLLM に切り替える手順（アカウント登録の要否・メモリ枯渇対策・Ollama に戻す手順・vLLM を削除する手順を含む）は [docs/vllm_migration.md](docs/vllm_migration.md) にまとめている。
-vLLM に切り替えた後、アプリ（Web 画面・夜間バッチ）を vLLM 対応版に入れ替える設置手順（`.env`・systemd のユニットの入れ直し・元に戻す方法）は [docs/migration_vllm_app.md](docs/migration_vllm_app.md) にまとめている。
-vLLM のモデルを Qwen3-Coder-Next から Gemma 4 31B に切り替える手順（事前ダウンロード・Hugging Face にログインできない場合の入手先・元に戻す方法）は [docs/vllm_gemma4.md](docs/vllm_gemma4.md) にまとめている。
-既存サーバーの設置フォルダを `/opt/Lang_Chain` から `/opt/Batch_Exec` に移す手順（仮想環境の作り直し・`.env`・systemd の入れ直し・元に戻す方法）は [docs/migration_rename_batch_exec.md](docs/migration_rename_batch_exec.md) にまとめている。
+サーバーの更新手順書は、作成日（PR のマージ日）ごとに `docs/pr<最初のPR番号>-<最後のPR番号>/` にまとめている（その日のPRが1件なら `docs/pr<番号>/`）。仕様・使い方の文書は `docs/` 直下に置く。
+以前の版（Go 専用）からサーバーを入れ替える手順は [docs/pr18-22/migration_multi_language.md](docs/pr18-22/migration_multi_language.md) にまとめている。
+チェックポイント廃止・再生成の見直し版（PR #21）への入れ替え手順は [docs/pr18-22/migration_drop_checkpointer.md](docs/pr18-22/migration_drop_checkpointer.md) にまとめている。
+Web 画面版（PR #23・#24）への入れ替え手順（夜間タイマーからの切り替え・GitLab の認証を含む）は [docs/pr23-25/migration_web_ui.md](docs/pr23-25/migration_web_ui.md) にまとめている。
+Ollama を止めて vLLM に切り替える手順（アカウント登録の要否・メモリ枯渇対策・Ollama に戻す手順・vLLM を削除する手順を含む）は [docs/pr33-38/vllm_migration.md](docs/pr33-38/vllm_migration.md) にまとめている。
+vLLM に切り替えた後、アプリ（Web 画面・夜間バッチ）を vLLM 対応版に入れ替える設置手順（`.env`・systemd のユニットの入れ直し・元に戻す方法）は [docs/pr33-38/migration_vllm_app.md](docs/pr33-38/migration_vllm_app.md) にまとめている。
+vLLM のモデルを Qwen3-Coder-Next から Gemma 4 31B に切り替える手順（事前ダウンロード・Hugging Face にログインできない場合の入手先・元に戻す方法）は [docs/pr39/vllm_gemma4.md](docs/pr39/vllm_gemma4.md) にまとめている。
+既存サーバーの設置フォルダを `/opt/Lang_Chain` から `/opt/Batch_Exec` に移す手順（仮想環境の作り直し・`.env`・systemd の入れ直し・元に戻す方法）は [docs/pr40-42/migration_rename_batch_exec.md](docs/pr40-42/migration_rename_batch_exec.md) にまとめている。
 
 ## サーバー(GB10)へのセットアップ
 
 コマンドは GB10 の端末で実行する（SSH は使えないため、GB10 に直接ログインした端末を使う）。
 
 ```bash
-# 1. 推論サーバー（vLLM）を起動する（手順は docs/vllm_migration.md）
+# 1. 推論サーバー（vLLM）を起動する（手順は docs/pr33-38/vllm_migration.md）
 #    --served-model-name claude-opus-4-6 --max-model-len 262144 --port 11434 で起動しておく
 #    （Ollama から移行したサーバーでは、Ollama と同じ 11434 番ポートで vLLM を待ち受ける）
 curl http://127.0.0.1:11434/v1/models   # claude-opus-4-6 が出ること
@@ -234,7 +235,7 @@ GB10 上で Web 画面を常駐させると、クライアント PC のブラウ
 閲覧は誰でもでき、実行と設定の変更は管理者パスワードでログインした人だけができる。
 複数人が同時に使える。対象・出力先フォルダはブラウザごとに選び、出力先が違えば同時に実行できる（Claude Code のセッションはサーバー全体で合計10まで）。
 同じ出力先では、Web 画面・コマンド・夜間タイマーの間でも同時に1つしか動かない（runner が出力先ごとにロックを取る）。
-この版への更新手順は [docs/migration_multi_user.md](docs/migration_multi_user.md)。
+この版への更新手順は [docs/pr40-42/migration_multi_user.md](docs/pr40-42/migration_multi_user.md)。
 設置・使い方・セキュリティ上の注意は [docs/web_ui.md](docs/web_ui.md) にまとめている。
 
 ## 運用（GB10 の端末と Web 画面）

@@ -5,7 +5,7 @@ Web 画面を追加した版（PR #23・#24）に、サーバー（GB10）を入
 
 - コマンドはすべて GB10 の端末で実行する（SSH は使えないため、GB10 に直接ログインした端末を使う）。sudo が必要な手順はパスワードを入力する
 - 例のパスは `/opt/Batch_Exec`（このリポジトリ）、`/srv/repos/myapp`（対象リポジトリ）、`/opt/Batch_Exec/out`（出力先）。実際のパスに置き換える
-- 画面の使い方・設定項目の詳細は [web_ui.md](web_ui.md) を参照
+- 画面の使い方・設定項目の詳細は [web_ui.md](../web_ui.md) を参照
 
 ## 0. この版で変わること
 
@@ -38,7 +38,7 @@ systemctl is-active godoc-nightly.service; tmux ls 2>/dev/null; pgrep -af godoc_
 cd /opt/Batch_Exec && git status --short
 ```
 
-` M`（変更）が表示されたら、`git diff` で内容を確かめてから `git stash` で退避する（[migration_drop_checkpointer.md](migration_drop_checkpointer.md) の 1-2 と同じ）。
+` M`（変更）が表示されたら、`git diff` で内容を確かめてから `git stash` で退避する（[migration_drop_checkpointer.md](../pr18-22/migration_drop_checkpointer.md) の 1-2 と同じ）。
 `??`（`out/`・`state/`・`.env`・`skills/`・`targets.toml` など Git の管理外のファイル）はそのままでよい。
 
 ### 1-3. 夜間タイマーの設定を控える
@@ -114,7 +114,7 @@ grep '^WEB_' /opt/Batch_Exec/.env | cut -c1-60
 画面の「実行前に git pull」・定期実行の git pull を使う場合だけ必要。使わない場合は手順 5 へ。
 
 git pull は Web 画面の実行ユーザー（手順 6 の `User=`）で、パスワード入力なしで動く必要がある（入力待ちで止まらないよう、git に尋ねさせない設定で実行する）。
-SSH は使えないため、**HTTPS とプロジェクトアクセストークン**で認証する。手順は [web_ui.md の「GitLab の認証（HTTPS とアクセストークン）」](web_ui.md#gitlab-の認証https-とアクセストークン) を参照（実行ユーザーで行う）。
+SSH は使えないため、**HTTPS とプロジェクトアクセストークン**で認証する。手順は [web_ui.md の「GitLab の認証（HTTPS とアクセストークン）」](../web_ui.md#gitlab-の認証https-とアクセストークン) を参照（実行ユーザーで行う）。
 
 **確認**（対象リポジトリごとに行う）
 

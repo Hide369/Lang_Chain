@@ -2,7 +2,7 @@
 
 vLLM（Docker）で動いている Qwen3-Coder-Next を、Gemma 4 の最上位モデル **Gemma 4 31B**（`google/gemma-4-31B-it`）に切り替える。モデルは先にダウンロードだけしておき、切り替えるときは `docker run` の引数を変えて起動し直すだけにする。Qwen3-Coder-Next のモデルは消さないので、いつでも戻せる。
 
-- 前提: [vllm_migration.md](vllm_migration.md) の手順で、vLLM（コンテナ名 `vllm`）が Qwen3-Coder-Next で動いていること
+- 前提: [vllm_migration.md](../pr33-38/vllm_migration.md) の手順で、vLLM（コンテナ名 `vllm`）が Qwen3-Coder-Next で動いていること
 - 対象環境: GB10（128GB ユニファイドメモリ、ARM64、Blackwell sm_121）
 - コマンドはすべて、GB10 に直接ログインした端末で実行する
 
@@ -174,7 +174,7 @@ docker run -d --name vllm --gpus all --network host --ipc=host \
 
 ## 手順3: 動作確認
 
-ログに `Application startup complete` が出るまで待つ（見方は [vllm_migration.md の手順4](vllm_migration.md#手順4-起動確認と動作テスト) と同じ）。
+ログに `Application startup complete` が出るまで待つ（見方は [vllm_migration.md の手順4](../pr33-38/vllm_migration.md#手順4-起動確認と動作テスト) と同じ）。
 
 ```bash
 # 1. 別名が一覧に出るか
@@ -233,7 +233,7 @@ sudo systemctl start godoc-nightly.timer # 止めていた場合
 | 起動時に `LocalEntryNotFoundError` などで落ちる | `HF_HUB_OFFLINE=1` なのに、モデルがキャッシュにない | 手順1のダウンロードが終わっているか、`du -sh` で確認する |
 | モデルのダウンロードが `401` や `gated` で失敗する | Hugging Face 側でログインを求められた | 「アカウント登録の要否」の再配布版や ModelScope から入手する |
 | 応答の本文に `<\|tool_call>` などがそのまま出て、ツールが実行されない | ツール呼び出しの解釈の不具合、またはチャットテンプレートの違い | 新しいイメージにする。それでも出る場合は、vLLM 同梱の `tool_chat_template_gemma4.jinja` を探して `--chat-template <パス>` を足す（`docker run --rm --entrypoint find <イメージ> / -name tool_chat_template_gemma4.jinja`） |
-| 本文が空で、シンキングだけになる | `--reasoning-parser` を付けている、または Claude Code 側のシンキングが有効 | `--reasoning-parser` を外し、Claude Code のシンキングを止める（[vllm_migration.md の手順5](vllm_migration.md#claude-code-のシンキングを止める必須)） |
+| 本文が空で、シンキングだけになる | `--reasoning-parser` を付けている、または Claude Code 側のシンキングが有効 | `--reasoning-parser` を外し、Claude Code のシンキングを止める（[vllm_migration.md の手順5](../pr33-38/vllm_migration.md#claude-code-のシンキングを止める必須)） |
 | 推論中に OS が固まる | メモリの使いすぎ（GB10 で Gemma 4 31B を高い割合で動かすと固まる報告がある） | 再起動後、`--gpu-memory-utilization 0.7`・`--max-model-len 65536` で起動し直す（`LLM_NUM_CTX` も合わせる） |
 | `No available memory for the cache blocks` | KV キャッシュの余地がない | `--max-model-len` を下げる |
 | 生成が非常に遅い | 31B Dense は GB10 では遅い（モデルの性質） | NVFP4 版（`nvidia/Gemma-4-31B-IT-NVFP4`）に替える |
