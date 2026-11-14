@@ -27,7 +27,7 @@ journalctl -u ollama --since "1 hour ago" | grep -i "loading model"
 次のコマンドで、タスクごとの傾向を集計できる（`<run_id>` は Web 画面の「実行履歴」や、ログの `run_id=...` で確認する）。
 
 ```bash
-cd /opt/Lang_Chain
+cd /opt/Batch_Exec
 .venv/bin/python - out/_runs/<run_id>.jsonl <<'EOF'
 import json, sys
 from collections import defaultdict
@@ -193,7 +193,7 @@ EOF
 **実際に使っている入力トークン数の最大値**（計測ログの全実行を集計する）
 
 ```bash
-cd /opt/Lang_Chain
+cd /opt/Batch_Exec
 .venv/bin/python - out/_runs <<'EOF'
 import glob, json, sys
 
@@ -258,7 +258,7 @@ sudo systemctl daemon-reload && sudo systemctl restart ollama
 ### 5-2. `.env` を合わせる
 
 ```bash
-# /opt/Lang_Chain/.env
+# /opt/Batch_Exec/.env
 LLM_NUM_CTX=65536
 ```
 

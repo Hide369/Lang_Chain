@@ -35,7 +35,7 @@
   - 「停止」は、自分が選んでいる出力先の実行だけを止める
 - runner 本体も、出力先フォルダごとにロック（`<出力先>/.runner.lock`）を取る。夜間タイマー・コマンド・Web 画面のどこから起動しても、同じ出力先では同時に1つしか動かない。後から起動した方は `エラー: 別の実行が進行中です` で止まる（終了コード `2`）
   - 夜間タイマーが動いている間は、画面の状態に「他の実行が進行中（夜間バッチ・コマンド）」と表示され、実行ボタンは押せない
-  - 出力先が違う実行どうしは同時に動ける（データは壊れないが、推論サーバーを取り合うので遅くなる）。夜間タイマーと同じ出力先（既定 `/opt/Lang_Chain/out`）を選んでおくと確実に排他できる
+  - 出力先が違う実行どうしは同時に動ける（データは壊れないが、推論サーバーを取り合うので遅くなる）。夜間タイマーと同じ出力先（既定 `/opt/Batch_Exec/out`）を選んでおくと確実に排他できる
 - スキル・対象の設定は全員で共有するため、誰かの実行中は変更できない。どの設定で動いた結果か分からなくなるのを防ぐため
   - フォルダはブラウザごとなので、実行中でも選び直せる（動いている実行は、起動したときのフォルダのまま続く）
 
@@ -51,7 +51,7 @@
 コマンドは GB10 の端末で実行する（SSH は使えないため、GB10 に直接ログインした端末を使う）。
 
 ```bash
-cd /opt/Lang_Chain
+cd /opt/Batch_Exec
 git pull
 .venv/bin/pip install -r requirements.txt     # fastapi・uvicorn が追加された
 
@@ -62,11 +62,11 @@ git pull
 # 2. 残りの設定を .env に追記する（値は環境に合わせる）
 #    CLAUDE_BIN は `which claude` のフルパスにしておく（systemd から起動すると PATH に ~/.local/bin が入らない）
 #    WEB_BROWSE_ROOTS に書くフォルダは先に作っておく（ないと起動しない）
-mkdir -p /opt/Lang_Chain/out
+mkdir -p /opt/Batch_Exec/out
 cat >> .env <<'EOF'
 WEB_HOST=0.0.0.0
 WEB_PORT=4000
-WEB_BROWSE_ROOTS=/srv/repos,/opt/Lang_Chain/out
+WEB_BROWSE_ROOTS=/srv/repos,/opt/Batch_Exec/out
 EOF
 
 # 3. 手動で起動して確かめる（Ctrl+C で止める）
@@ -92,13 +92,13 @@ sudo ufw allow from 192.168.31.0/24 to any port 4000 proto tcp
 | 項目 | 必須 | 内容 |
 |---|---|---|
 | `WEB_ADMIN_PASSWORD_HASH` | 必須 | 管理者パスワードのハッシュ。`python -m godoc_agent.web.password` で作る。パスワードを変えるときも同じ手順で作り直し、Web 画面を再起動する |
-| `WEB_BROWSE_ROOTS` | 必須 | フォルダ選択ダイアログで辿れる起点（カンマ区切りの絶対パス）。対象・出力先はこの下からしか選べない。広くしすぎない（例：`/srv/repos,/opt/Lang_Chain/out`） |
+| `WEB_BROWSE_ROOTS` | 必須 | フォルダ選択ダイアログで辿れる起点（カンマ区切りの絶対パス）。対象・出力先はこの下からしか選べない。広くしすぎない（例：`/srv/repos,/opt/Batch_Exec/out`） |
 | `WEB_HOST` | 任意 | 待ち受けるアドレス。既定 `127.0.0.1`（GB10 自身からだけ）。LAN から使うなら `0.0.0.0` |
 | `WEB_PORT` | 任意 | 既定 `4000` |
 | `WEB_SESSION_TTL_HOURS` | 任意 | ログインの有効時間。既定 `12` |
 | `WEB_VIEW_REQUIRES_LOGIN` | 任意 | `true` にすると閲覧にもログインが必要。既定 `false` |
 | `WEB_COOKIE_SECURE` | 任意 | HTTPS で使う場合は `true`。既定 `false` |
-| `WEB_STATE_DIR` | 任意 | 画面で選んだフォルダの保存先。既定 `/opt/Lang_Chain/state/web` |
+| `WEB_STATE_DIR` | 任意 | 画面で選んだフォルダの保存先。既定 `/opt/Batch_Exec/state/web` |
 
 設定の誤り（ハッシュの形式、`WEB_BROWSE_ROOTS` のフォルダがないなど）があると、`エラー: ...` を表示して起動しない。
 
@@ -233,7 +233,7 @@ sudo systemctl disable --now godoc-nightly.timer
 systemctl list-timers godoc-nightly.timer   # 表示されなければ止まっている
 ```
 
-画面では、対象フォルダを夜間タイマーの `GODOC_REPO`、出力先を `GODOC_OUT`（既定 `/opt/Lang_Chain/out`）と同じにすると、これまでの設計書・差分スキップの記録を引き継げる。
+画面では、対象フォルダを夜間タイマーの `GODOC_REPO`、出力先を `GODOC_OUT`（既定 `/opt/Batch_Exec/out`）と同じにすると、これまでの設計書・差分スキップの記録を引き継げる。
 
 ### スキルの保存先
 
@@ -269,7 +269,7 @@ systemctl list-timers godoc-nightly.timer   # 表示されなければ止まっ�
 
 ### 対象の設定の保存先
 
-`TARGETS_CONFIG`、未設定なら `/opt/Lang_Chain/targets.toml` に保存する（runner が読む場所と同じ）。
+`TARGETS_CONFIG`、未設定なら `/opt/Batch_Exec/targets.toml` に保存する（runner が読む場所と同じ）。
 `targets.toml` がない間は例の設定（targets.example.toml）が表示され、保存すると `targets.toml` が作られる。
 検証は runner と同じ処理で行うので、書き方の誤りは保存時にエラーとして表示される（保存されない）。
 画面から保存すると、ファイル内のコメントは消える。書き方の詳細は [target_files.md](target_files.md) を参照。

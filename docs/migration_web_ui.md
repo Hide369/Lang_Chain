@@ -4,7 +4,7 @@ Web 画面を追加した版（PR #23・#24）に、サーバー（GB10）を入
 入れ替え前の版は PR #22（コミット `072ecbc`）を想定している。
 
 - コマンドはすべて GB10 の端末で実行する（SSH は使えないため、GB10 に直接ログインした端末を使う）。sudo が必要な手順はパスワードを入力する
-- 例のパスは `/opt/Lang_Chain`（このリポジトリ）、`/srv/repos/myapp`（対象リポジトリ）、`/opt/Lang_Chain/out`（出力先）。実際のパスに置き換える
+- 例のパスは `/opt/Batch_Exec`（このリポジトリ）、`/srv/repos/myapp`（対象リポジトリ）、`/opt/Batch_Exec/out`（出力先）。実際のパスに置き換える
 - 画面の使い方・設定項目の詳細は [web_ui.md](web_ui.md) を参照
 
 ## 0. この版で変わること
@@ -35,7 +35,7 @@ systemctl is-active godoc-nightly.service; tmux ls 2>/dev/null; pgrep -af godoc_
 ### 1-2. サーバーで直接書き換えたファイルがないこと
 
 ```bash
-cd /opt/Lang_Chain && git status --short
+cd /opt/Batch_Exec && git status --short
 ```
 
 ` M`（変更）が表示されたら、`git diff` で内容を確かめてから `git stash` で退避する（[migration_drop_checkpointer.md](migration_drop_checkpointer.md) の 1-2 と同じ）。
@@ -52,21 +52,21 @@ systemctl cat godoc-nightly.service | grep -E 'GODOC_|^User='; systemctl list-ti
 | 控える値 | 使う場所 |
 |---|---|
 | `GODOC_REPO`（対象リポジトリ） | 画面の「対象フォルダ」（手順 7） |
-| `GODOC_OUT`（なければ `/opt/Lang_Chain/out`） | 画面の「出力先」（手順 7） |
+| `GODOC_OUT`（なければ `/opt/Batch_Exec/out`） | 画面の「出力先」（手順 7） |
 | `User=` | Web 画面の実行ユーザー（手順 6。同じユーザーにする） |
 | タイマーの時刻（`list-timers` の NEXT） | 画面の定期実行の時刻（手順 8） |
 
 ## 2. プログラムを更新する
 
 ```bash
-cd /opt/Lang_Chain && git pull && .venv/bin/pip install -r requirements.txt
+cd /opt/Batch_Exec && git pull && .venv/bin/pip install -r requirements.txt
 ```
 
 `requirements.txt` に `fastapi`・`uvicorn` が追加されたため、`pip install` が必要。
 
 ```bash
 # テスト（Ollama・Claude Code 不要）。最後に「207 passed」と表示されればよい
-cd /opt/Lang_Chain && .venv/bin/python -m pytest
+cd /opt/Batch_Exec && .venv/bin/python -m pytest
 ```
 
 テストは本物の `git` コマンドを使うものがある（git pull の確認のテスト）。`git` が入っていれば追加の準備は不要。
@@ -79,9 +79,9 @@ Web 画面は systemd のサービスとして動き、そこから runner と c
 夜間タイマーを設置済みなら、すでにフルパスになっているはず。
 
 ```bash
-which claude; grep '^CLAUDE_BIN=' /opt/Lang_Chain/.env
+which claude; grep '^CLAUDE_BIN=' /opt/Batch_Exec/.env
 # 2行目が CLAUDE_BIN=claude のままなら、1行目のパスに直す（例）
-cd /opt/Lang_Chain && sed -i 's|^CLAUDE_BIN=.*|CLAUDE_BIN=/home/<ユーザー>/.local/bin/claude|' .env
+cd /opt/Batch_Exec && sed -i 's|^CLAUDE_BIN=.*|CLAUDE_BIN=/home/<ユーザー>/.local/bin/claude|' .env
 ```
 
 ### 3-2. 管理者パスワード
@@ -90,9 +90,9 @@ cd /opt/Lang_Chain && sed -i 's|^CLAUDE_BIN=.*|CLAUDE_BIN=/home/<ユーザー>/.
 
 ```bash
 # パスワードを2回入力する。表示された WEB_ADMIN_PASSWORD_HASH=... の行をコピーする
-cd /opt/Lang_Chain && .venv/bin/python -m godoc_agent.web.password
+cd /opt/Batch_Exec && .venv/bin/python -m godoc_agent.web.password
 # コピーした行を .env に追記する（シングルクォートで囲む）
-echo 'WEB_ADMIN_PASSWORD_HASH=scrypt:32768:8:1:...' >> /opt/Lang_Chain/.env
+echo 'WEB_ADMIN_PASSWORD_HASH=scrypt:32768:8:1:...' >> /opt/Batch_Exec/.env
 ```
 
 ### 3-3. 待ち受けとフォルダ選択の範囲
@@ -101,10 +101,10 @@ echo 'WEB_ADMIN_PASSWORD_HASH=scrypt:32768:8:1:...' >> /opt/Lang_Chain/.env
 **書いたフォルダが存在しないと Web 画面は起動しない**ので、先に作っておく。
 
 ```bash
-mkdir -p /opt/Lang_Chain/out && ls -d /srv/repos /opt/Lang_Chain/out
-cd /opt/Lang_Chain && printf 'WEB_HOST=0.0.0.0\nWEB_PORT=4000\nWEB_BROWSE_ROOTS=/srv/repos,/opt/Lang_Chain/out\n' >> .env
+mkdir -p /opt/Batch_Exec/out && ls -d /srv/repos /opt/Batch_Exec/out
+cd /opt/Batch_Exec && printf 'WEB_HOST=0.0.0.0\nWEB_PORT=4000\nWEB_BROWSE_ROOTS=/srv/repos,/opt/Batch_Exec/out\n' >> .env
 # 確認（WEB_ で始まる4行が表示されればよい。ハッシュは同じ行が2回入っていないこと）
-grep '^WEB_' /opt/Lang_Chain/.env | cut -c1-60
+grep '^WEB_' /opt/Batch_Exec/.env | cut -c1-60
 ```
 
 設計書の内容を LAN の誰にも見せたくない場合は `WEB_VIEW_REQUIRES_LOGIN=true` も追記する（既定は閲覧はログイン不要）。
@@ -146,11 +146,11 @@ GIT_TERMINAL_PROMPT=0 git -C /srv/repos/myapp pull --ff-only
 
 ```bash
 # 1. まず手動で起動して確かめる（Ctrl+C で止める）。「Uvicorn running on http://0.0.0.0:4000」と表示されればよい
-cd /opt/Lang_Chain && .venv/bin/python -m godoc_agent.web
+cd /opt/Batch_Exec && .venv/bin/python -m godoc_agent.web
 #    → クライアント PC のブラウザで http://192.168.31.26:4000 を開き、画面が出ることを確かめてから Ctrl+C
 
 # 2. サービスとして登録する（sudo。実行ユーザーは夜間タイマーと同じユーザーにする）
-cd /opt/Lang_Chain && sudo cp deploy/systemd/godoc-web.service /etc/systemd/system/ \
+cd /opt/Batch_Exec && sudo cp deploy/systemd/godoc-web.service /etc/systemd/system/ \
   && sudo sed -i "s/REPLACE_WITH_USER/$USER/" /etc/systemd/system/godoc-web.service \
   && sudo systemctl daemon-reload && sudo systemctl enable --now godoc-web.service
 # 3. 確認（active と表示されればよい）
@@ -206,7 +206,7 @@ sudo systemctl disable --now godoc-web.service
 # 2. 夜間タイマーを戻す
 sudo systemctl enable --now godoc-nightly.timer
 # 3. プログラムを前の版に戻す（必要な場合だけ。PR #22 の時点）
-cd /opt/Lang_Chain && git checkout 072ecbc
+cd /opt/Batch_Exec && git checkout 072ecbc
 ```
 
 `.env` に追加した `WEB_*` の行は、前の版では読まれないので残っていてよい。

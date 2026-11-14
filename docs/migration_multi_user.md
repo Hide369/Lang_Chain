@@ -17,14 +17,14 @@
 ## 1. コードを更新する
 
 ```bash
-cd /opt/Lang_Chain
+cd /opt/Batch_Exec
 git pull
 ```
 
 ## 2. .env を直す
 
 ```bash
-nano /opt/Lang_Chain/.env
+nano /opt/Batch_Exec/.env
 ```
 
 - `LLM_BASE_URL=http://127.0.0.1:11434` にする（vLLM の `--port` と同じ）
@@ -34,13 +34,13 @@ nano /opt/Lang_Chain/.env
 ```bash
 GODOC_REPO=/srv/repos/myapp
 # 出力先を変えていた場合だけ
-# GODOC_OUT=/opt/Lang_Chain/out
+# GODOC_OUT=/opt/Batch_Exec/out
 ```
 
 確認する（`LLM_BASE_URL` が 11434 で、`LLM_CONCURRENCY`・`OLLAMA_BASE_URL` が出なければよい）。
 
 ```bash
-grep -E '^(LLM_BASE_URL|LLM_CONCURRENCY|OLLAMA_BASE_URL|GODOC_REPO|GODOC_OUT)=' /opt/Lang_Chain/.env
+grep -E '^(LLM_BASE_URL|LLM_CONCURRENCY|OLLAMA_BASE_URL|GODOC_REPO|GODOC_OUT)=' /opt/Batch_Exec/.env
 curl -s http://127.0.0.1:11434/v1/models   # claude-opus-4-6 が出ること
 ```
 
