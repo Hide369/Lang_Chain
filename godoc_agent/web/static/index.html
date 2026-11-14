@@ -152,6 +152,13 @@
       <span id="out-path" class="path mono"></span>
       <button type="button" data-pick="out" data-admin>選択…</button>
     </div>
+    <div class="row">
+      <span class="label">PC から</span>
+      <button type="button" id="upload-folder" data-admin>PC のフォルダをアップロード…</button>
+      <input id="upload-input" type="file" multiple webkitdirectory class="hidden">
+      <span class="muted small">選んだフォルダをサーバーに送って対象フォルダにします（出力先は自動で決まります。.git・node_modules は送りません）。生成物は下の「すべて ZIP でダウンロード」で持ち帰れます</span>
+    </div>
+    <div id="upload-msg"></div>
     <div id="workspace-msg"></div>
   </section>
 
@@ -251,7 +258,10 @@
 
   <section>
     <h2>生成物</h2>
-    <div class="row"><input id="filter" type="search" placeholder="パスで絞り込み" style="flex:1"></div>
+    <div class="row">
+      <input id="filter" type="search" placeholder="パスで絞り込み" style="flex:1">
+      <a id="outputs-zip" href="/api/outputs/archive" download>すべて ZIP でダウンロード</a>
+    </div>
     <div class="scroll">
       <table>
         <thead><tr><th>パス</th><th>更新</th></tr></thead>

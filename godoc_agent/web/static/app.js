@@ -206,6 +206,61 @@ for (const button of document.querySelectorAll("[data-pick]")) {
   button.addEventListener("click", () => openFolderDialog(button.dataset.pick).catch((err) => message("workspace-msg", err.message)));
 }
 
+// --- クライアント PC からのアップロード ----------------------------------------------------------
+
+// 送らないフォルダ（大きく、設計書の対象にもならない）
+const UPLOAD_SKIP_DIRS = new Set([".git", "node_modules"]);
+// 1回のリクエストで送る量の目安（大きなフォルダでもサーバーのメモリを圧迫しないよう分けて送る）
+const UPLOAD_BATCH_BYTES = 4 * 1024 * 1024;
+const UPLOAD_BATCH_FILES = 200;
+
+async function uploadFolder(fileList) {
+  // フォルダを選ぶと「選んだフォルダ名/…」の形で届く。先頭のフォルダ名がサーバー上の置き場所の名前になる
+  const name = fileList[0].webkitRelativePath.split("/")[0];
+  const files = fileList.filter((f) => !f.webkitRelativePath.split("/").slice(1, -1).some((p) => UPLOAD_SKIP_DIRS.has(p)));
+  if (files.length === 0) throw new Error("送るファイルがありません");
+  const totalMb = (files.reduce((sum, f) => sum + f.size, 0) / 1024 / 1024).toFixed(1);
+  if (!confirm(`${name}（${files.length} ファイル・${totalMb}MB）をサーバーにアップロードし、対象フォルダにします。よろしいですか？`)) return;
+
+  const { upload_id: uploadId } = await send("POST", "/api/uploads", { name });
+  const base = `/api/uploads/${encodeURIComponent(uploadId)}`;
+  try {
+    let batch = [];
+    let batchBytes = 0;
+    let sent = 0;
+    const flush = async () => {
+      if (batch.length === 0) return;
+      await send("POST", `${base}/files`, { files: batch });
+      sent += batch.length;
+      batch = [];
+      batchBytes = 0;
+      message("upload-msg", `アップロード中… ${sent} / ${files.length} ファイル`, true);
+    };
+    for (const file of files) {
+      batch.push({ path: file.webkitRelativePath.split("/").slice(1).join("/"), content_b64: await fileToBase64(file) });
+      batchBytes += file.size;
+      if (batchBytes >= UPLOAD_BATCH_BYTES || batch.length >= UPLOAD_BATCH_FILES) await flush();
+    }
+    await flush();
+    state.workspace = await send("POST", `${base}/complete`);
+  } catch (err) {
+    // 途中で失敗したら、サーバーに残った途中のファイルを消す（消せなくても次のアップロードで片付く）
+    send("DELETE", base).catch(() => {});
+    throw err;
+  }
+  renderWorkspace();
+  message("upload-msg", `${name} をアップロードしました（${files.length} ファイル）。このまま「実行」できます`, true);
+  await Promise.all([refreshHistory(), refreshOutputs()]);
+}
+
+$("upload-folder").addEventListener("click", () => $("upload-input").click());
+$("upload-input").addEventListener("change", () => {
+  // 同じフォルダを続けて選び直せるよう入力欄はすぐ空に戻す（中身は先に配列へ写す）
+  const files = [...$("upload-input").files];
+  $("upload-input").value = "";
+  if (files.length) uploadFolder(files).catch((err) => message("upload-msg", err.message));
+});
+
 function renderWorkspace() {
   $("repo-path").textContent = state.workspace.repo || "未設定";
   $("out-path").textContent = state.workspace.out || "未設定";
