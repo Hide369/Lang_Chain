@@ -181,7 +181,7 @@ git pull は NAS 上のリポジトリに書き込むため、次が必要にな
      ```bash
      sudo -u <実行ユーザー> git config --global --add safe.directory /mnt/nas/repos/myapp
      ```
-3. GitLab の認証は、ローカルのリポジトリと同じ設定で使える（[migration_web_ui.md](migration_web_ui.md) の「4. 実行前の git pull を使う場合：GitLab の認証」）
+3. GitLab の認証は、ローカルのリポジトリと同じ設定で使える（[migration_web_ui.md](pr23-25/migration_web_ui.md) の「4. 実行前の git pull を使う場合：GitLab の認証」）
 
 **確認**：
 

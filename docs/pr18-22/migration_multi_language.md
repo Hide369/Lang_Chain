@@ -3,7 +3,7 @@
 処理対象を設定ファイル（`targets.toml`）で決め、設計書スキルを全言語で共通の `design-doc-batch` にした版（PR #19）に、サーバー（GB10）を入れ替える手順をまとめる。
 コマンドはすべて GB10 の端末で実行する（SSH は使えないため、GB10 に直接ログインした端末を使う）。sudo は不要。
 
-設定ファイルの書き方は [target_files.md](target_files.md) を参照。
+設定ファイルの書き方は [target_files.md](../target_files.md) を参照。
 
 ## 1. 事前確認
 
@@ -51,7 +51,7 @@ ls /opt/Batch_Exec/skills/design-doc-batch/SKILL.md && grep -c '^CLAUDE_SKILL_PA
 `ls` で SKILL.md のパスが表示され、`grep -c` が `0` を表示すれば完了。
 SKILL.md の先頭に `name:` がある場合は、`design-doc-batch` に揃えておく（runner はこの項目を使わないが、名前を揃えておくと分かりやすい）。
 
-対象の言語・フォルダを変える場合だけ、設定ファイルを作って編集する（書き方は [target_files.md](target_files.md)）。
+対象の言語・フォルダを変える場合だけ、設定ファイルを作って編集する（書き方は [target_files.md](../target_files.md)）。
 
 ```bash
 cd /opt/Batch_Exec && cp -n targets.example.toml targets.toml
