@@ -150,4 +150,4 @@ ls /opt/Batch_Exec/skills/design-doc-batch/SKILL.md
 
 `CLAUDE_SKILL_PATH` は、スキルを別の場所に置く場合のために残している。
 
-サーバー全体の入れ替え手順（更新されるファイル・確認方法・元に戻す方法）は [migration_multi_language.md](pr18-22/migration_multi_language.md) にまとめている。
+サーバー全体の入れ替え手順（更新されるファイル・確認方法・元に戻す方法）は [migration_multi_language.md](../pr18-22/migration_multi_language.md) にまとめている。
