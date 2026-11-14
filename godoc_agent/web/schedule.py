@@ -1,9 +1,11 @@
-"""Web 画面に内蔵した定期実行（毎日決まった時刻に、画面で選んでいるフォルダで runner を実行する）。
+"""Web 画面に内蔵した定期実行（毎日決まった時刻に、設定を保存した人が選んでいたフォルダで runner を実行する）。
 
 systemd の夜間タイマー（deploy/systemd/godoc-nightly.timer）の代わりに使う。両方を有効にしないこと。
 - 実行時刻に Web 画面が止まっていた場合は、起動後にその日の分を実行する（systemd の Persistent=true と同じ）
 - 実行時刻に別の実行が動いていれば、終わってから実行する（その日のうちは待ち続ける）
 - 1日に実行するのは1回だけ。設定を保存した時点で今日の実行時刻を過ぎていれば、今日の分は実行せず翌日からにする
+- 対象・出力先フォルダは、設定を保存したときにそのブラウザで選んでいたもの（複数人がそれぞれ別のフォルダを選べるため）。
+  以前の版で保存した設定（フォルダの記録がない）は、共有の既定値（state/web/workspace.json）を使う
 """
 
 import json
@@ -34,6 +36,8 @@ class Schedule:
     time: str = "02:00"  # サーバーの現地時刻（HH:MM）
     tasks: list[str] = field(default_factory=lambda: [DOC, COMMENT])
     git_pull: bool = True
+    repo: str | None = None
+    out: str | None = None
     # 内部の記録（画面からは変えない）
     last_attempt_date: str | None = None  # この日の分は実行済み（または実行できないと確定した）
     last_run: dict | None = None  # 直近の定期実行（run_id・開始時刻、または実行できなかった理由）
@@ -85,13 +89,19 @@ class ScheduleStore:
         with self._lock:
             return self._write(fn(self.get()))
 
-    def save_settings(self, enabled: bool, time_: str, tasks: list[str], git_pull: bool, now: datetime) -> Schedule:
+    def save_settings(
+        self, enabled: bool, time_: str, tasks: list[str], git_pull: bool, now: datetime,
+        *, repo: str | None = None, out: str | None = None,
+    ) -> Schedule:
         validate_time(time_)
         if not tasks:
             raise ValueError("タスクを1つ以上選んでください")
 
         def apply(current: Schedule) -> Schedule:
-            new = replace(current, enabled=enabled, time=time_, tasks=list(dict.fromkeys(tasks)), git_pull=git_pull)
+            new = replace(
+                current, enabled=enabled, time=time_, tasks=list(dict.fromkeys(tasks)), git_pull=git_pull,
+                repo=repo or current.repo, out=out or current.out,
+            )
             # 保存した時点で今日の時刻を過ぎていれば、今日の分は実行しない（保存した途端に動き出さないように）。
             # まだ来ていなければ、今日すでに実行していても新しい時刻でもう一度実行する
             today = now.date()
@@ -128,10 +138,11 @@ class Scheduler:
             return None
 
         ws = self.workspace.get()
+        repo_raw, out_raw = (schedule.repo, schedule.out) if schedule.repo and schedule.out else (ws.repo, ws.out)
         try:
-            if not ws.repo or not ws.out:
+            if not repo_raw or not out_raw:
                 raise ValueError("対象フォルダ・出力先フォルダが未設定です")
-            repo, out = self.workspace.check_repo(ws.repo), self.workspace.check_out(ws.out)
+            repo, out = self.workspace.check_repo(repo_raw), self.workspace.check_out(out_raw)
             # 登録を外したスキルのタスクは除く（設計書スキルがなければ実行できない）
             tasks = [t for t in schedule.tasks if self.skills.is_registered(t)]
             if not tasks:
@@ -142,8 +153,10 @@ class Scheduler:
             log.warning("定期実行を開始できませんでした: %s", e)
             return None
 
-        # 手動の実行・夜間バッチ・コマンドからの実行が動いていれば、終わってから実行する
-        if self.jobs.running or is_locked(out):
+        # 同じ出力先で手動の実行・夜間バッチ・コマンドからの実行が動いていれば、終わってから実行する
+        # （別の出力先の実行とは同時に動く。セッション数はサーバー全体で抑えられる）
+        same_out = self.jobs.job_for(out)
+        if (same_out is not None and same_out.running) or is_locked(out):
             return None
         try:
             job = self.jobs.start(repo, out, tasks, 0, False, git_pull=schedule.git_pull, trigger=SCHEDULED)

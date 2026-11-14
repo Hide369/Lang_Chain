@@ -10,7 +10,9 @@ const state = {
   admin: false,
   tab: "run",
   workspace: { repo: null, out: null },
-  running: false,
+  running: false,    // このブラウザで選んでいる出力先の実行が動いているか
+  anyRunning: false, // 他の人の実行を含め、Web から起動した実行が動いているか
+  jobRunId: null,    // このブラウザで選んでいる出力先の、最後の実行の run_id（停止の対象）
   logRunId: null,   // ログ欄に表示中の run_id
   logOffset: 0,
   sessionSlot: null, // セッションログを表示中の枠の番号（null は非表示）
@@ -78,8 +80,9 @@ function lines(text) {
 // 管理者だけが使える操作（data-admin）と、実行中は変えられない設定の入力欄をまとめて切り替える
 function applyPermissions() {
   for (const node of document.querySelectorAll("[data-admin]")) {
-    const lockedWhileRunning = node.closest("#tab-targets, #tab-skills") || node.dataset.pick;
-    node.disabled = !state.admin || Boolean(lockedWhileRunning && state.running);
+    // スキル・対象の設定は全員で共有するため、誰かの実行中は変えられない（フォルダはブラウザごとなので、いつでも選べる）
+    const lockedWhileAnyRunning = node.closest("#tab-targets, #tab-skills");
+    node.disabled = !state.admin || Boolean(lockedWhileAnyRunning && state.anyRunning);
   }
   for (const node of document.querySelectorAll(".admin-note")) node.classList.toggle("hidden", state.admin);
   document.querySelector('[data-tab="skills"]').classList.toggle("hidden", !state.admin);
@@ -258,12 +261,11 @@ async function loadConfig() {
   renderConcurrency(config.concurrency);
 }
 
-function renderConcurrency({ default: fallback, max, error }) {
+function renderConcurrency({ default: fallback, max }) {
   const input = $("concurrency");
   input.max = String(max);
-  // 入力中の値は残し、未入力のときだけ .env の既定値を入れる
+  // 入力中の値は残し、未入力のときだけ既定値を入れる
   if (input.value === "" && fallback != null) input.value = String(fallback);
-  if (error) message("concurrency-note", `.env の設定に誤りがあります（${error}）。ここで 1〜${max} を指定してください`);
 }
 
 $("run-form").addEventListener("submit", async (e) => {
@@ -278,7 +280,7 @@ $("run-form").addEventListener("submit", async (e) => {
   try {
     const job = await send("POST", "/api/runs", {
       tasks, limit: Number($("limit").value) || 0, force: $("force").checked, git_pull: $("git-pull").checked,
-      concurrency: Number($("concurrency").value) || null,  // 未入力なら .env の LLM_CONCURRENCY
+      concurrency: Number($("concurrency").value) || null,  // 未入力なら既定値（サーバー全体の上限と同じ）
     });
     followRun(job.run_id);
     await refreshStatus();
@@ -291,7 +293,7 @@ $("stop").addEventListener("click", async () => {
   if (!confirm("実行を停止しますか？（完了済みのファイルは残り、再実行で続きから処理されます）")) return;
   $("run-error").textContent = "";
   try {
-    await send("POST", "/api/runs/stop");
+    await send("POST", "/api/runs/stop", { run_id: state.jobRunId });
     await refreshStatus();
   } catch (err) {
     $("run-error").textContent = err.message;
@@ -349,7 +351,7 @@ function badge(text, cls) {
 }
 
 async function refreshStatus() {
-  const { job, busy_elsewhere: busyElsewhere } = await api("/api/status");
+  const { job, busy_elsewhere: busyElsewhere, others = [], server } = await api("/api/status");
   const running = job?.running ?? false;
   let status;
   if (running) status = badge(job.stop_requested ? "停止中…" : "実行中", "running");
@@ -367,14 +369,28 @@ async function refreshStatus() {
       + `\n対象 ${job.repo}\n出力 ${job.out}`
     : "";
   $("status-detail").style.whiteSpace = "pre-wrap";
+  renderServerLoad(others, server);
 
   state.running = running;
+  state.anyRunning = running || others.length > 0;
+  state.jobRunId = job?.run_id ?? null;
   applyPermissions();
   $("start").disabled = !state.admin || running || busyElsewhere;
   $("stop").disabled = !state.admin || !running || job.stop_requested;
 
   if (job && state.following && state.logRunId !== job.run_id) followRun(job.run_id);
   return job;
+}
+
+// 他の人の実行（別の出力先）と、サーバー全体の Claude Code のセッションの使用状況
+function renderServerLoad(others, server) {
+  const lines = [];
+  if (server) lines.push(`サーバー全体の Claude Code セッション: 使用中 ${server.active_sessions} / ${server.max_sessions}`);
+  for (const other of others) {
+    lines.push(`他の実行: ${other.trigger === "scheduled" ? "定期実行" : "手動"} / run_id=${other.run_id}`
+      + ` / 開始 ${fmtTime(other.started_at)} / 出力 ${other.out}`);
+  }
+  $("server-load").textContent = lines.join("\n");
 }
 
 function followRun(runId) {

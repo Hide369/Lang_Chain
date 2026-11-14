@@ -4,7 +4,7 @@ Goソースファイルから詳細設計書(Markdown)を一括生成するLangG
 GB10サーバー上で動かし、クライアント PC のブラウザ（Web 画面）か、GB10 の端末から起動する（GB10 へは SSH で接続できない前提）。
 
 設計書は、サーバー上の **Claude Code（`claude -p`）がエージェントとして**、既存の **SKILL.md をそのまま使って**書く。
-モデルは同じサーバー内の vLLM の Anthropic 互換API（`/v1/messages`）経由で Qwen3-Coder-Next（別名 `claude-sonnet-4-5` で提供）を使うため、ソースコードはサーバーの外に出ない（Ollama に戻すこともできる）。
+モデルは同じサーバー内の vLLM の Anthropic 互換API（`/v1/messages`）経由で Qwen3-Coder-Next（別名 `claude-opus-4-6` で提供）を使うため、ソースコードはサーバーの外に出ない（Ollama に戻すこともできる）。
 LangGraph は、その外側で並列制御・差分スキップ・検証・計測を受け持つ。
 
 同じ仕組みで、**ソースファイルにコメントを追記するスキル**も一括で実行できる（`CLAUDE_COMMENT_SKILL_PATH` を設定した場合。[コメント追記](#コメント追記)を参照）。
@@ -37,7 +37,7 @@ generate の中身（ファイルごと）:
   claude -p "<対象ファイル>の詳細設計書を作成"
     ├─ システムプロンプト: SKILL.md の全文 + バッチ用ルール
     ├─ ツール: Read / Glob / Grep のみ（作業ディレクトリ = --repo）
-    └─ モデル: vLLM(Qwen3-Coder-Next、別名 claude-sonnet-4-5)
+    └─ モデル: vLLM(Qwen3-Coder-Next、別名 claude-opus-4-6)
 ```
 
 | ファイル | 役割 |
@@ -71,8 +71,9 @@ vLLM のモデルを Qwen3-Coder-Next から Gemma 4 31B に切り替える手�
 
 ```bash
 # 1. 推論サーバー（vLLM）を起動する（手順は docs/vllm_migration.md）
-#    --served-model-name claude-sonnet-4-5 --max-model-len 262144 --max-num-seqs 2 で起動しておく
-curl http://127.0.0.1:8000/v1/models   # claude-sonnet-4-5 が出ること
+#    --served-model-name claude-opus-4-6 --max-model-len 262144 --port 11434 で起動しておく
+#    （Ollama から移行したサーバーでは、Ollama と同じ 11434 番ポートで vLLM を待ち受ける）
+curl http://127.0.0.1:11434/v1/models   # claude-opus-4-6 が出ること
 
 # 2. Claude Code をインストール
 curl -fsSL https://claude.ai/install.sh | bash
@@ -213,9 +214,11 @@ python -m godoc_agent.runner --repo /srv/repos/myapp --out ./out --tasks doc,tes
 ```
 
 - `--limit` はファイル×タスクの件数で数える（両方のタスクを実行する場合、`--limit 5` は約2.5ファイル分）
-- 並列数（`LLM_CONCURRENCY`。1〜10、`--concurrency` で実行ごとに変えられる）はタスクをまたいだ合計。両方のタスクを実行すると Claude Code の実行回数はおよそ2倍になる
+- 並列数（`--concurrency`。1〜10、既定 10）はタスクをまたいだ合計。両方のタスクを実行すると Claude Code の実行回数はおよそ2倍になる
+- さらに、サーバー全体（Web 画面の複数人の実行・夜間バッチ・コマンドの合計）でも同時に 10 セッションまでに抑える。空きがなければ空くまで待つ
+- 入力がコンテキスト（`LLM_NUM_CTX` = vLLM の `--max-model-len`、256K）を超えるファイルは、失敗にせず**警告付きでスキップ**して次のファイルへ進む（計測ログの `status` が `too_large` / `context_overflow`、`warnings` に理由）
 
-終了コード: `0` 全件成功 / `1` 一部失敗（詳細は計測ログ） / `2` 設定・接続エラー、または同じ出力先で別の実行が進行中のため開始できず
+終了コード: `0` 全件成功（警告付きのスキップを含む） / `1` 一部失敗（詳細は計測ログ） / `2` 設定・接続エラー、または同じ出力先で別の実行が進行中のため開始できず
 
 ## ブラウザ（Web 画面）からの運用
 
@@ -228,7 +231,9 @@ GB10 上で Web 画面を常駐させると、クライアント PC のブラウ
 - 毎日の定期実行（オン/オフ・時刻・タスク・実行前の git pull）の設定。systemd の夜間タイマーの代わりに使える
 
 閲覧は誰でもでき、実行と設定の変更は管理者パスワードでログインした人だけができる。
-同時に動く runner は1つだけになるよう、Web 画面・コマンド・夜間タイマーの間でも排他する（runner が出力先ごとにロックを取る）。
+複数人が同時に使える。対象・出力先フォルダはブラウザごとに選び、出力先が違えば同時に実行できる（Claude Code のセッションはサーバー全体で合計10まで）。
+同じ出力先では、Web 画面・コマンド・夜間タイマーの間でも同時に1つしか動かない（runner が出力先ごとにロックを取る）。
+この版への更新手順は [docs/migration_multi_user.md](docs/migration_multi_user.md)。
 設置・使い方・セキュリティ上の注意は [docs/web_ui.md](docs/web_ui.md) にまとめている。
 
 ## 運用（GB10 の端末と Web 画面）

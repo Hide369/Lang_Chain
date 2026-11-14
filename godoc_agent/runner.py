@@ -8,6 +8,9 @@
     python -m godoc_agent.runner --repo /path/to/repo --out ./out  # 再実行: 生成済み・変更なしのファイルは飛ばす
     python -m godoc_agent.runner --repo /path/to/repo --out ./out --tasks comment         # コメント追記だけ
     python -m godoc_agent.runner --repo /path/to/repo --out ./out --concurrency 4         # 同時に4セッション
+
+同時セッション数は、1回の実行につき --concurrency（既定 10）まで、さらにサーバー全体（Web 画面の複数の実行・
+夜間バッチ・コマンドの合計）で 10 まで（slots.py）。入力がコンテキストを超えるファイルは、失敗にせず警告付きでスキップする。
 """
 
 import argparse
@@ -23,13 +26,14 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from .claude_code import build_claude_code
-from .config import APP_DIR, MAX_CONCURRENCY, Settings, load_settings
-from .doc_graph import build_doc_graph
+from .config import APP_DIR, DEFAULT_CONCURRENCY, MAX_CONCURRENCY, Settings, load_settings
+from .doc_graph import SKIPPED_STATUSES, build_doc_graph
 from .source_common import sha256_text
 from .preflight import preflight
 from .prompts import load_skill
 from .runlock import run_lock
 from .sessions import SessionBoard, sessions_path
+from .slots import GlobalSlots
 from .targets import discover_source_files
 from .skill_registry import COMMENT, DOC, find_skill
 from .tasks import Task, build_skill_task
@@ -44,7 +48,7 @@ class FileResult:
     duration_s: float
     attempts: int = 0
     issues: list[str] | None = None
-    # 合否には影響しない注意（コンテキスト上限への接近など）。issues と違い done でも残る
+    # 合否には影響しない注意（コンテキスト上限への接近・超過によるスキップなど）。issues と違い done でも残る
     warnings: list[str] | None = None
     llm_calls: list[dict] | None = None
     error: str | None = None
@@ -160,8 +164,8 @@ def save_output(task_run: TaskRun, out_dir: Path, result: FileResult) -> None:
 def context_warnings(llm_calls: list[dict] | None, settings: Settings) -> list[str]:
     """入力トークン数が LLM_NUM_CTX の LLM_CTX_WARN_RATIO を超えた実行を警告にする。
 
-    Ollama はコンテキスト超過分を黙って切り捨てるため、検証に合格していても入力の一部が
-    読まれていない可能性がある（vLLM は超過するとリクエストごと失敗するが、上限に近いことは同じく知らせる）。合否の判定はグラフに任せ、ここでは注意として残すだけにする。
+    vLLM は超過するとリクエストごと失敗させる（そのファイルは context_overflow でスキップされる）。
+    超える前に上限に近いことを知らせ、LLM_NUM_CTX・CLAUDE_MAX_TURNS の見直しに使う。合否の判定はグラフに任せる。
     """
     warnings = []
     for i, call in enumerate(llm_calls or [], start=1):
@@ -169,9 +173,22 @@ def context_warnings(llm_calls: list[dict] | None, settings: Settings) -> list[s
         if total is not None and total > settings.ctx_warn_tokens:
             warnings.append(
                 f"{i} 回目の実行の入力が {total} トークンで、LLM_NUM_CTX={settings.num_ctx} の "
-                f"{settings.ctx_warn_ratio:.0%} を超えています（入力が切り捨てられた可能性があります）"
+                f"{settings.ctx_warn_ratio:.0%} を超えています（コンテキストの上限に近づいています）"
             )
     return warnings
+
+
+def skip_warnings(result: FileResult) -> list[str]:
+    """入力が大きすぎて処理できなかったファイルの警告。失敗にはせず、スキップしたことを残す。"""
+    if result.status not in SKIPPED_STATUSES:
+        return []
+    reason = "; ".join(result.issues or []) or result.status
+    return [f"入力がコンテキストの上限を超えるため、このファイルはスキップしました（{reason}）"]
+
+
+def is_ok(result: FileResult) -> bool:
+    """バッチの成否に数えないもの（成功・警告付きのスキップ）。"""
+    return result.status == "done" or result.status in SKIPPED_STATUSES
 
 
 def summarize(results: list[FileResult], wall_s: float) -> str:
@@ -179,8 +196,10 @@ def summarize(results: list[FileResult], wall_s: float) -> str:
     turns = [c["num_turns"] for c in calls if c.get("num_turns")]
     # usage を返さない実行（不明）は除いて集計する
     input_tokens = [c["total_input_tokens"] for c in calls if c.get("total_input_tokens") is not None]
-    warned = [r for r in results if r.warnings]
+    warned = [r for r in results if r.warnings and r.status not in SKIPPED_STATUSES]
+    skipped = [r for r in results if r.status in SKIPPED_STATUSES]
     done = [r for r in results if r.status == "done"]
+    failed = [r for r in results if not is_ok(r)]
     lines = [f"対象: {len(results)} 件 / 経過時間: {wall_s / 60:.1f} 分"]
     for task in dict.fromkeys(r.task for r in results):
         counts = Counter(r.status for r in results if r.task == task)
@@ -195,10 +214,12 @@ def summarize(results: list[FileResult], wall_s: float) -> str:
         )
     if warned:
         lines.append(f"コンテキスト上限に近い実行があった件数: {len(warned)} 件（計測ログの warnings を参照）")
+    if skipped:
+        lines.append(f"警告: 入力がコンテキストの上限を超えるためスキップした件数: {len(skipped)} 件（計測ログの warnings を参照）")
     if done:
         lines.append(f"成功1件あたり平均: {sum(r.duration_s for r in done) / len(done):.0f} 秒")
     if results:
-        lines.append(f"失敗率: {(len(results) - len(done)) / len(results):.1%}")
+        lines.append(f"失敗率: {len(failed) / len(results):.1%}")
     return "\n".join(lines)
 
 
@@ -298,8 +319,9 @@ async def _run_batch(args: argparse.Namespace, settings: Settings, repo: Path, o
     if targets:  # 読み込めないファイルだけのときは、推論サーバーに接続できなくても結果を記録できるようにする
         await preflight(settings)
     metrics_path = out_dir / "_runs" / f"{args.run_id}.jsonl"
-    # 同時に動く claude の数（セッション枠の数）はタスクをまたいだ合計で抑える（推論サーバーの同時処理数に合わせるため）
-    concurrency = args.concurrency or settings.concurrency
+    # 同時に動く claude の数（セッション枠の数）はタスクをまたいだ合計で抑える。
+    # さらにサーバー全体の枠（GlobalSlots）で、他の実行と合わせた合計も MAX_CONCURRENCY までに抑える
+    concurrency = args.concurrency or DEFAULT_CONCURRENCY
     print(f"同時セッション数={concurrency}", flush=True)
     results: list[FileResult] = []
     started = time.perf_counter()
@@ -314,7 +336,9 @@ async def _run_batch(args: argparse.Namespace, settings: Settings, repo: Path, o
     }
 
     # 抜けるとき（失敗・中断を含む）に、Web 画面が実行中の表示をやめられるよう終了を記録する
-    board = SessionBoard(sessions_path(out_dir, args.run_id), args.run_id, concurrency, len(targets))
+    board = SessionBoard(
+        sessions_path(out_dir, args.run_id), args.run_id, concurrency, len(targets), global_slots=GlobalSlots(),
+    )
     with board, metrics_path.open("a", encoding="utf-8") as metrics_file:
         jobs = [
             asyncio.create_task(process_file(runs[task.name], board, rel_path, language, source, source_hash, out_dir))
@@ -330,13 +354,13 @@ async def _run_batch(args: argparse.Namespace, settings: Settings, repo: Path, o
         i = 0
         async for result in finished_results():
             i += 1
-            result.warnings = context_warnings(result.llm_calls, settings)
+            result.warnings = skip_warnings(result) + context_warnings(result.llm_calls, settings)
             if result.status == "done" and result.draft:
                 save_output(runs[result.task], out_dir, result)
             results.append(result)
             metrics_file.write(json.dumps(result.to_log(), ensure_ascii=False) + "\n")
             metrics_file.flush()
-            detail = f" ({result.error or '; '.join(result.issues or [])})" if result.status != "done" else ""
+            detail = f" ({result.error or '; '.join(result.issues or [])})" if not is_ok(result) else ""
             if result.warnings:
                 detail += f" [警告: {'; '.join(result.warnings)}]"
             print(
@@ -346,7 +370,7 @@ async def _run_batch(args: argparse.Namespace, settings: Settings, repo: Path, o
 
     print(summarize(results, time.perf_counter() - started), flush=True)
     print(f"計測ログ: {metrics_path}", flush=True)
-    return 0 if all(r.status == "done" for r in results) else 1
+    return 0 if all(is_ok(r) for r in results) else 1
 
 
 def _task_list(value: str) -> list[str]:
@@ -380,7 +404,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--force", action="store_true", help="変更のないファイルも再生成する")
     p.add_argument(
         "--concurrency", type=_concurrency, default=None,
-        help=f"同時に動かす Claude Code のセッション数（1〜{MAX_CONCURRENCY}）。省略時は .env の LLM_CONCURRENCY",
+        help=(
+            f"この実行で同時に動かす Claude Code のセッション数（1〜{MAX_CONCURRENCY}。省略時は {DEFAULT_CONCURRENCY}）。"
+            f"サーバー全体（他の実行との合計）でも {MAX_CONCURRENCY} を超えない"
+        ),
     )
     return p.parse_args(argv)
 

@@ -1,4 +1,7 @@
-"""Web 画面からの runner の実行を管理する。同時に動かす runner は1つだけ（runner の中で最大10セッションを並列に動かす）。
+"""Web 画面からの runner の実行を管理する。
+
+複数人がそれぞれ選んだ出力先で、runner を同時に動かせる（同じ出力先では同時に1つだけ）。
+各 runner の中では Claude Code のセッションを並列に動かし、その合計はサーバー全体で最大10に抑える（slots.py）。
 
 runner は別プロセスで起動する（コマンドで実行したときと同じ動きにし、Web サーバーが落ちても
 バッチの途中経過は manifest に残るようにするため）。出力は計測ログと同じ `<out>/_runs/` にログとして残す。
@@ -17,8 +20,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from ..config import MAX_CONCURRENCY
 from ..runlock import LOCK_FILE_NAME, is_locked
 from ..sessions import sessions_path
+from ..slots import GlobalSlots
 from .settings import APP_DIR
 
 # 停止を指示してから、応じないプロセスを強制終了するまでの秒数
@@ -30,6 +35,10 @@ _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 MANUAL = "manual"
 SCHEDULED = "scheduled"
 _RUN_ID_PREFIX = {MANUAL: "web", SCHEDULED: "scheduled"}
+# Web 画面から同時に動かせる runner の数。runner は最低1セッション使うため、全体のセッション数の上限より多くしても意味がない
+MAX_RUNNING_JOBS = MAX_CONCURRENCY
+# 終了した実行を、状態の表示用に覚えておく数（出力先ごとの直近の1件は数に関係なく残す）
+_KEEP_FINISHED_JOBS = 50
 
 
 def _output_kind(rel: Path) -> str:
@@ -57,7 +66,7 @@ class Job:
     proc: subprocess.Popen
     git_pull: bool = False
     trigger: str = MANUAL
-    concurrency: int | None = None  # None は .env の LLM_CONCURRENCY
+    concurrency: int | None = None  # None は runner の既定値（config.DEFAULT_CONCURRENCY）
     stop_requested: bool = False
     finished_at: str | None = None
 
@@ -88,26 +97,49 @@ class Job:
 
 
 class JobManager:
-    def __init__(self, runner_cmd: list[str] | None = None, cwd: Path = APP_DIR):
+    def __init__(self, runner_cmd: list[str] | None = None, cwd: Path = APP_DIR, global_slots: GlobalSlots | None = None):
         self._runner_cmd = runner_cmd or [sys.executable, "-m", "godoc_agent.runner"]
         self._cwd = cwd
-        self._job: Job | None = None
+        self._global_slots = global_slots or GlobalSlots()
+        # 起動した順。終了したものも、状態の表示のためにしばらく残す
+        self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
 
     @property
     def current(self) -> Job | None:
-        return self._job
+        """最後に起動した実行。"""
+        return next(reversed(self._jobs.values()), None)
 
     @property
     def running(self) -> bool:
-        return self._job is not None and self._job.running
+        """Web から起動した実行が1つでも動いているか。"""
+        return any(job.running for job in list(self._jobs.values()))
+
+    def running_jobs(self) -> list[Job]:
+        return [job for job in list(self._jobs.values()) if job.running]
+
+    def get(self, run_id: str) -> Job | None:
+        return self._jobs.get(run_id)
+
+    def job_for(self, out_dir: Path | None) -> Job | None:
+        """その出力先で最後に起動した実行（画面は、自分が選んでいる出力先の実行を表示する）。"""
+        if out_dir is None:
+            return None
+        return next((job for job in reversed(list(self._jobs.values())) if job.out_dir == out_dir), None)
 
     def status(self, out_dir: Path | None) -> dict:
-        job = self._job
+        job = self.job_for(out_dir)
+        running = self.running_jobs()
         return {
             "job": job.to_dict() if job else None,
             # Web 以外（夜間バッチ・コマンド）から、選んでいる出力先で実行が動いているか
-            "busy_elsewhere": not self.running and out_dir is not None and is_locked(out_dir),
+            "busy_elsewhere": not (job and job.running) and out_dir is not None and is_locked(out_dir),
+            # 他の人が別の出力先で動かしている実行（Claude Code のセッションはサーバー全体で取り合う）
+            "others": [
+                {k: v for k, v in other.to_dict().items() if k in ("run_id", "out", "trigger", "started_at", "concurrency")}
+                for other in running if other is not job
+            ],
+            "server": {"active_sessions": self._global_slots.busy_count(), "max_sessions": self._global_slots.limit},
         }
 
     def start(
@@ -115,8 +147,13 @@ class JobManager:
         *, git_pull: bool = False, trigger: str = MANUAL, concurrency: int | None = None,
     ) -> Job:
         with self._lock:
-            if self._job is not None and self._job.running:
-                raise JobBusy(f"実行中です（run_id={self._job.run_id}）。終了または停止してから実行してください")
+            same_out = self.job_for(out_dir)
+            if same_out is not None and same_out.running:
+                raise JobBusy(
+                    f"この出力先では実行中です（run_id={same_out.run_id}）。終了または停止してから実行するか、別の出力先を選んでください"
+                )
+            if len(self.running_jobs()) >= MAX_RUNNING_JOBS:
+                raise JobBusy(f"同時に実行できるのは {MAX_RUNNING_JOBS} 件までです。どれかが終了してから実行してください")
             if is_locked(out_dir):
                 raise JobBusy("別の実行（夜間バッチ・コマンドからの実行）が進行中です。終了してから実行してください")
 
@@ -151,17 +188,26 @@ class JobManager:
                     # 停止のとき、runner が起動した claude もまとめて止められるようにプロセスグループを分ける
                     start_new_session=os.name != "nt",
                 )
-            self._job = Job(
+            job = Job(
                 run_id=run_id, repo=repo, out_dir=out_dir, tasks=tasks, limit=limit, force=force,
                 started_at=datetime.now().isoformat(timespec="seconds"), log_path=log_path, proc=proc,
                 git_pull=git_pull, trigger=trigger, concurrency=concurrency,
             )
-            return self._job
+            self._jobs[run_id] = job
+            self._forget_old_jobs()
+            return job
 
-    def stop(self) -> Job | None:
+    def _forget_old_jobs(self) -> None:
+        finished = [job for job in self._jobs.values() if not job.running]
+        latest_per_out = {job.out_dir: job for job in finished}  # 後に起動したものが残る
+        for job in finished[: max(0, len(finished) - _KEEP_FINISHED_JOBS)]:
+            if latest_per_out.get(job.out_dir) is not job:
+                del self._jobs[job.run_id]
+
+    def stop(self, run_id: str) -> Job | None:
         """実行中の runner を止める。完了済みのファイルは manifest に残り、再実行で続きから処理される。"""
         with self._lock:
-            job = self._job
+            job = self._jobs.get(run_id)
             if job is None or not job.running:
                 return None
             job.stop_requested = True
@@ -185,11 +231,15 @@ class JobManager:
         except ProcessLookupError:
             pass  # すでに終了している
 
-    @staticmethod
-    def _new_run_id(runs_dir: Path, prefix: str) -> str:
+    def _new_run_id(self, runs_dir: Path, prefix: str) -> str:
         base = datetime.now().strftime(f"{prefix}-%Y%m%d-%H%M%S")
         run_id, n = base, 1
-        while (runs_dir / f"{run_id}.log").exists() or (runs_dir / f"{run_id}.jsonl").exists():
+        # 別の出力先で同じ秒に起動した実行とも重ならないようにする（run_id で実行を見分けるため）
+        while (
+            run_id in self._jobs
+            or (runs_dir / f"{run_id}.log").exists()
+            or (runs_dir / f"{run_id}.jsonl").exists()
+        ):
             n += 1
             run_id = f"{base}-{n}"
         return run_id
@@ -208,7 +258,7 @@ class JobManager:
         with path.open("rb") as f:
             f.seek(offset)
             chunk = f.read(LOG_CHUNK_BYTES)
-        job = self._job
+        job = self._jobs.get(run_id)
         still_writing = job is not None and job.log_path == path and job.running
         if still_writing or len(chunk) == LOG_CHUNK_BYTES:
             # 行の途中（UTF-8 の文字の途中を含む）で切らないよう、最後の改行までにする
@@ -229,8 +279,8 @@ class JobManager:
             raise FileNotFoundError(run_id)
         data = json.loads(path.read_text(encoding="utf-8"))
         # 強制終了された runner は終了を書き出せないため、プロセスの状態で確かめる
-        job = self._job
-        if job is not None and job.run_id == run_id and job.out_dir == out_dir:
+        job = self._jobs.get(run_id)
+        if job is not None and job.out_dir == out_dir:
             alive = job.running
         else:  # 夜間バッチ・コマンドからの実行。出力先のロックで判断する
             alive = is_locked(out_dir)

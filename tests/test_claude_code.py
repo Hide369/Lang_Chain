@@ -6,13 +6,13 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from conftest import claude_result
-from godoc_agent.claude_code import ClaudeCodeError, ClaudeCodeLLM, build_claude_code
+from godoc_agent.claude_code import ClaudeCodeError, ClaudeCodeLLM, ContextOverflowError, build_claude_code, is_context_overflow
 from godoc_agent.config import load_settings
 from godoc_agent.go_source import extract_facts
 from godoc_agent.prompts import build_agent_messages, load_skill
 
 MODEL = "claude-sonnet-4-5"
-BASE_URL = "http://127.0.0.1:8000"
+BASE_URL = "http://127.0.0.1:11434"
 
 
 def make_llm(fake_claude, cwd: Path, *, timeout_s: float = 30) -> ClaudeCodeLLM:
@@ -129,6 +129,29 @@ async def test_max_turns_error_explains_limit_and_how_to_raise_it(fake_claude, t
     assert "error_max_turns" in message
     assert "CLAUDE_MAX_TURNS=7" in message
     assert "使ったターン数=8" in message
+
+
+@pytest.mark.parametrize("response", [
+    # vLLM の 400 応答を Claude Code が result に入れて返す
+    claude_result(
+        "API Error: 400 This model's maximum context length is 262144 tokens. However, you requested 270000 tokens.",
+        is_error=True,
+    ) | {"exit": 1},
+    # Claude Code 自身が断る
+    claude_result("Prompt is too long", is_error=True) | {"exit": 1},
+    # JSON を出さずに stderr にだけ出る
+    {"stdout": "", "stderr": "max_model_len exceeded", "exit": 1},
+])
+async def test_context_overflow_is_reported_as_its_own_error(fake_claude, tmp_path, response):
+    fake_claude.respond(response)
+
+    with pytest.raises(ContextOverflowError, match="コンテキストの上限"):
+        await make_llm(fake_claude, tmp_path).ainvoke([HumanMessage("作成して")])
+
+
+def test_other_errors_are_not_mistaken_for_context_overflow():
+    assert not is_context_overflow("API Error: connection refused")
+    assert not is_context_overflow("error_max_turns")
 
 
 async def test_unparsable_output_raises_with_stderr(fake_claude, tmp_path):

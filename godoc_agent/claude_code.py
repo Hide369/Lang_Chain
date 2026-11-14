@@ -1,6 +1,6 @@
 """Claude Code（ヘッドレスモード `claude -p`）で設計書を生成するアダプター。
 
-モデルは同じサーバー内の推論サーバー（vLLM。Ollama にも戻せる）の Anthropic 互換API（/v1/messages）で動かすため、ソースコードはサーバーの外に出ない。
+モデルは同じサーバー内の推論サーバー（vLLM）の Anthropic 互換API（/v1/messages）で動かすため、ソースコードはサーバーの外に出ない。
 doc_graph からは `ainvoke(messages) -> AIMessage` を持つチャットモデルとして扱える。
 呼び出しのたびに新しいセッションで起動する（`--resume` はしない）。再生成で会話が伸び続けて
 コンテキストを超えるのを防ぐため、再生成に必要な情報（直前の出力と問題点）は doc_graph が依頼文に入れて渡す。
@@ -9,6 +9,7 @@ doc_graph からは `ainvoke(messages) -> AIMessage` を持つチャットモデ
 import asyncio
 import json
 import os
+import re
 import shlex
 import shutil
 from pathlib import Path
@@ -22,8 +23,27 @@ _READ_ONLY_TOOLS = "Read,Glob,Grep"
 _STDERR_TAIL_CHARS = 2000
 
 
+# 推論サーバーがコンテキスト（vLLM の --max-model-len）を超えたリクエストを断ったときの文言。
+# vLLM: "This model's maximum context length is 262144 tokens. However, you requested ..."、
+#       "... is longer than the maximum model length ..."
+# Claude Code: "Prompt is too long"、"input length and `max_tokens` exceed context limit"
+_CONTEXT_OVERFLOW_RE = re.compile(
+    r"maximum context length|maximum model length|max_model_len|context_length_exceeded"
+    r"|exceeds? (?:the )?(?:model'?s? )?context|exceed context limit|prompt is too long",
+    re.IGNORECASE,
+)
+
+
 class ClaudeCodeError(RuntimeError):
     pass
+
+
+class ContextOverflowError(ClaudeCodeError):
+    """入力がコンテキストの上限を超え、推論サーバーに断られた。同じ入力で再試行しても結果は変わらない。"""
+
+
+def is_context_overflow(text: str) -> bool:
+    return bool(_CONTEXT_OVERFLOW_RE.search(text))
 
 
 class ClaudeCodeLLM:
@@ -102,6 +122,13 @@ class ClaudeCodeLLM:
             )
         return ""
 
+    @staticmethod
+    def _error(message: str, output: str) -> ClaudeCodeError:
+        # コンテキスト超過は再試行しても直らないため、呼び出し側が警告付きのスキップにできるよう型で区別する
+        if is_context_overflow(output):
+            return ContextOverflowError(f"入力がコンテキストの上限を超えたため、推論サーバーに断られました: {message}")
+        return ClaudeCodeError(message)
+
     async def ainvoke(self, messages: list[AnyMessage], config=None, **kwargs) -> AIMessage:
         proc = await asyncio.create_subprocess_exec(
             *self._args(messages),
@@ -122,13 +149,14 @@ class ClaudeCodeLLM:
         try:
             data = json.loads(stdout)
         except json.JSONDecodeError:
-            raise ClaudeCodeError(
-                f"Claude Code の出力をJSONとして読めません (exit={proc.returncode}): {stderr_tail}"
+            raise self._error(
+                f"Claude Code の出力をJSONとして読めません (exit={proc.returncode}): {stderr_tail}", stderr_tail,
             ) from None
         if proc.returncode != 0 or data.get("is_error"):
-            raise ClaudeCodeError(
-                f"Claude Code がエラー終了しました (exit={proc.returncode}, subtype={data.get('subtype')}): "
-                f"{data.get('result') or stderr_tail or self._error_hint(data)}"
+            detail = data.get("result") or stderr_tail or self._error_hint(data)
+            raise self._error(
+                f"Claude Code がエラー終了しました (exit={proc.returncode}, subtype={data.get('subtype')}): {detail}",
+                f"{data.get('result') or ''}\n{stderr_tail}",
             )
 
         usage = data.get("usage") or {}

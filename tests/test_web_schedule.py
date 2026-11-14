@@ -113,6 +113,28 @@ def test_runs_once_a_day_at_the_scheduled_time(sched_client, jobs, clock, repo_d
     assert sch.tick() is not None
 
 
+def test_schedule_keeps_folders_of_the_person_who_saved_it(sched_client, jobs, clock, repo_dir, out_dir, root):
+    # 複数人がそれぞれ別のフォルダを選べるため、定期実行は保存したときのフォルダで動く（後で誰かが選び直しても変わらない）
+    save_schedule(sched_client)
+    assert sched_client.get("/api/schedule").json()["out"] == str(out_dir.resolve())
+    assert set_workspace(sched_client, repo_dir, root / "other_out").status_code == 200
+
+    clock.now = datetime(2026, 11, 8, 2, 0)
+    job = scheduler(sched_client).tick()
+    assert job is not None
+    assert job.out_dir == out_dir.resolve()
+
+
+def test_scheduled_run_does_not_wait_for_runs_on_other_outputs(sched_client, jobs, clock, repo_dir, root, monkeypatch):
+    save_schedule(sched_client)
+    monkeypatch.setenv("FAKE_RUNNER_SLEEP", "30")
+    # 別の人が別の出力先で実行中でも、定期実行は始まる（セッション数はサーバー全体で抑えられる）
+    assert set_workspace(sched_client, repo_dir, root / "other_out").status_code == 200
+    assert start_run(sched_client).status_code == 202
+    clock.now = datetime(2026, 11, 8, 2, 0)
+    assert scheduler(sched_client).tick() is not None
+
+
 def test_missed_run_is_executed_when_server_starts_later_that_day(sched_client, clock):
     save_schedule(sched_client)
     # 2:00 に Web 画面が止まっていて、9:00 に起動した

@@ -4,7 +4,7 @@ GB10 上で vLLM を起動するときは、確保メモリ量を明示的に絞
 
 - 対象環境: GB10（CPU と GPU が 128GB のユニファイドメモリを共有）、vLLM 0.15.0 以上
 - モデル: Qwen3-Coder-Next の FP8 版（`Qwen/Qwen3-Coder-Next-FP8`）。Ollama で使っている `qwen3-coder-next` と同じモデルで、コンテキスト長も同じ 256K（262144）にする。BF16 版は重みだけで約160GBあり GB10 に載らないため、FP8 版を使う
-- モデル名: `--served-model-name claude-sonnet-4-5` で別名を付けて提供する。アプリの `.env` の `LLM_MODEL` もこの別名にする（Claude Code が `--model` と補助モデルにこの名前を使う）
+- モデル名: `--served-model-name claude-opus-4-6` で別名を付けて提供する。アプリの `.env` の `LLM_MODEL` もこの別名にする（Claude Code が `--model` と補助モデルにこの名前を使う）
 - 枯渇の主な原因: vLLM の既定 `--gpu-memory-utilization 0.9` がメモリの約9割を起動時に予約するため、OS や他プロセス（Ollama など）の分が残らない
 - もう一つの原因: 長い `max-model-len` と多い同時処理数が、KV キャッシュ用に大量のメモリを予約する
 
@@ -162,8 +162,8 @@ docker run -d --name vllm --gpus all --network host --ipc=host \
   -v ~/.cache/huggingface:/root/.cache/huggingface \
   nvcr.io/nvidia/vllm:<タグ> \
   vllm serve Qwen/Qwen3-Coder-Next-FP8 \
-    --served-model-name claude-sonnet-4-5 \
-    --host 0.0.0.0 --port 8000 \
+    --served-model-name claude-opus-4-6 \
+    --host 0.0.0.0 --port 11434 \
     --gpu-memory-utilization 0.8 \
     --max-model-len 262144 \
     --max-num-seqs 2 \
@@ -199,16 +199,16 @@ Qwen3-Coder-Next FP8 は重みだけで約85GBあるため、`--gpu-memory-utili
 | --- | --- | --- | --- |
 | `--gpu-memory-utilization` | 0.9 | 0.8 | vLLM が予約するメモリの割合（0.8 で約100GB）。残り約25GBが OS の分 |
 | `--max-model-len` | 262144 | 262144 | Ollama の `OLLAMA_CONTEXT_LENGTH`・`.env` の `LLM_NUM_CTX` と同じ値にする |
-| `--max-num-seqs` | 256前後 | 2 | 同時処理数。`.env` の `LLM_CONCURRENCY` と揃える |
+| `--max-num-seqs` | 256前後 | 2 | 同時処理数。指定しなくてもよい（アプリ側でサーバー全体の同時セッションを 10 までに抑える） |
 | `--kv-cache-dtype` | auto | fp8 | KV キャッシュをほぼ半減。256K を載せるために使う |
-| `--served-model-name` | モデルのリポジトリ名 | claude-sonnet-4-5 | API で指定するモデル名（別名）。`.env` の `LLM_MODEL` と揃える |
+| `--served-model-name` | モデルのリポジトリ名 | claude-opus-4-6 | API で指定するモデル名（別名）。`.env` の `LLM_MODEL` と揃える |
 | `--enable-auto-tool-choice` `--tool-call-parser` | 無効 | 有効・`qwen3_coder` | Claude Code などのツール呼び出しを解釈する |
 | `--enforce-eager` | 無効 | 必要時のみ | CUDA グラフ分のメモリを節約（速度は低下） |
 
 ```bash
 vllm serve Qwen/Qwen3-Coder-Next-FP8 \
-  --served-model-name claude-sonnet-4-5 \
-  --host 0.0.0.0 --port 8000 \
+  --served-model-name claude-opus-4-6 \
+  --host 0.0.0.0 --port 11434 \
   --gpu-memory-utilization 0.8 \
   --max-model-len 262144 \
   --max-num-seqs 2 \
@@ -221,7 +221,7 @@ vllm serve Qwen/Qwen3-Coder-Next-FP8 \
 
 1. `--enforce-eager` を追加
 2. `--max-model-len` を 131072 に下げる
-3. `--max-num-seqs` を 1 に下げる（`.env` の `LLM_CONCURRENCY` も 1 にする）
+3. `--max-num-seqs` を 1 に下げる（Web 画面の同時セッション数・`--concurrency` も 1 にする）
 4. `--max-model-len` を 65536 に下げる
 
 ## 手順4: 起動確認と動作テスト
@@ -230,7 +230,7 @@ vLLM は、モデルの読み込みとウォームアップがすべて終わっ
 
 1. `Loading safetensors checkpoint shards: xx%`（モデルの読み込み）
 2. `torch.compile` / `Capturing CUDA graphs`（ウォームアップ。数分止まって見えることがある）
-3. `Application startup complete` / `Uvicorn running on http://0.0.0.0:8000`（起動完了。ここから `curl` が通る）
+3. `Application startup complete` / `Uvicorn running on http://0.0.0.0:11434`（起動完了。ここから `curl` が通る）
 
 途中で止まって見えるときは、次で進んでいるかを確かめる。
 
@@ -275,16 +275,16 @@ docker run --rm -it \
 ログに起動完了が出たら、API を叩いて応答とメモリ残量を確認する。
 
 ```bash
-# モデル一覧（claude-sonnet-4-5 が出ること）
-curl http://localhost:8000/v1/models
+# モデル一覧（claude-opus-4-6 が出ること）
+curl http://localhost:11434/v1/models
 
 # 推論テスト
-curl http://localhost:8000/v1/chat/completions \
+curl http://localhost:11434/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"こんにちは"}],"max_tokens":64}'
+  -d '{"model":"claude-opus-4-6","messages":[{"role":"user","content":"こんにちは"}],"max_tokens":64}'
 
 # Claude Code が使う Anthropic 互換API（/v1/messages）の応答テスト
-curl http://localhost:8000/v1/messages   -H "Content-Type: application/json" -H "x-api-key: local" -H "anthropic-version: 2023-06-01"   -d '{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"こんにちは"}],"max_tokens":64}'
+curl http://localhost:11434/v1/messages   -H "Content-Type: application/json" -H "x-api-key: local" -H "anthropic-version: 2023-06-01"   -d '{"model":"claude-opus-4-6","messages":[{"role":"user","content":"こんにちは"}],"max_tokens":64}'
 
 # 推論中にもう一つの端末でメモリを監視
 watch -n 2 free -h
@@ -302,15 +302,15 @@ watch -n 2 free -h
 
 ### 案1: `--served-model-name` に Claude 名の別名を足す（推奨）
 
-Modelfile の直接の代わりになる。手順1.5・3 の起動コマンドの `--served-model-name` を次のようにする。`claude-sonnet-4-5` の部分は、Ollama の Modelfile で付けていた名前と同じにする。
+Modelfile の直接の代わりになる。手順1.5・3 の起動コマンドの `--served-model-name` を次のようにする。`claude-opus-4-6` の部分は、Ollama の Modelfile で付けていた名前と同じにする。
 
 ```bash
 docker run -d --name vllm --gpus all --network host --ipc=host \
   -v ~/.cache/huggingface:/root/.cache/huggingface \
   nvcr.io/nvidia/vllm:<タグ> \
   vllm serve Qwen/Qwen3-Coder-Next-FP8 \
-    --served-model-name claude-sonnet-4-5 qwen3-coder-next \
-    --host 0.0.0.0 --port 8000 \
+    --served-model-name claude-opus-4-6 qwen3-coder-next \
+    --host 0.0.0.0 --port 11434 \
     --gpu-memory-utilization 0.8 \
     --max-model-len 262144 \
     --max-num-seqs 2 \
@@ -322,8 +322,8 @@ docker run -d --name vllm --gpus all --network host --ipc=host \
 
 ```bash
 # /opt/Lang_Chain/.env
-LLM_BASE_URL=http://127.0.0.1:8000
-LLM_MODEL=claude-sonnet-4-5
+LLM_BASE_URL=http://127.0.0.1:11434
+LLM_MODEL=claude-opus-4-6
 ```
 
 - 以前の版のアプリは `OLLAMA_BASE_URL` しか読まない。この版でも `LLM_BASE_URL` がなければ `OLLAMA_BASE_URL` を使うが、vLLM では `LLM_BASE_URL` を書き、`OLLAMA_BASE_URL` の行は消す
@@ -331,28 +331,28 @@ LLM_MODEL=claude-sonnet-4-5
 
 - アプリは `ANTHROPIC_DEFAULT_OPUS_MODEL`・`SONNET`・`HAIKU` をすべて `LLM_MODEL` にするので、別名は1つあれば足りる。補助処理（haiku 系）も同じ名前で vLLM に届く
 - アプリは `ANTHROPIC_AUTH_TOKEN=local` を渡す（以前の版は `ollama`）。vLLM を `--api-key` なしで起動していれば値は見られない
-- `/v1/models` の一覧と応答の `model` 欄には先頭の名前（`claude-sonnet-4-5`）が出る
-- gpt-oss-120b で動かす場合も同じ。`--served-model-name claude-sonnet-4-5 gpt-oss-120b` とし、`.env` の `LLM_NUM_CTX=131072` は「gpt-oss-120b に切り替える手順」のとおりにする
+- `/v1/models` の一覧と応答の `model` 欄には先頭の名前（`claude-opus-4-6`）が出る
+- gpt-oss-120b で動かす場合も同じ。`--served-model-name claude-opus-4-6 gpt-oss-120b` とし、`.env` の `LLM_NUM_CTX=131072` は「gpt-oss-120b に切り替える手順」のとおりにする
 - 運用メモの systemd 化をする場合は、`ExecStart` の `--served-model-name` も同じにする
 
 起動後、Claude Code が使う Anthropic 互換の `/v1/messages` に Claude 名で応答が返るかを確かめる。
 
 ```bash
 # 1. 別名が一覧に出るか
-curl http://localhost:8000/v1/models
+curl http://localhost:11434/v1/models
 
 # 2. Anthropic 互換エンドポイントに Claude 名で届くか
-curl http://localhost:8000/v1/messages \
+curl http://localhost:11434/v1/messages \
   -H "Content-Type: application/json" \
-  -d '{"model":"claude-sonnet-4-5","max_tokens":64,"messages":[{"role":"user","content":"こんにちは"}]}'
+  -d '{"model":"claude-opus-4-6","max_tokens":64,"messages":[{"role":"user","content":"こんにちは"}]}'
 
 # 3. Claude Code のヘッドレスモードで届くか
-ANTHROPIC_BASE_URL=http://127.0.0.1:8000 ANTHROPIC_AUTH_TOKEN=local ANTHROPIC_API_KEY= \
+ANTHROPIC_BASE_URL=http://127.0.0.1:11434 ANTHROPIC_AUTH_TOKEN=local ANTHROPIC_API_KEY= \
 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
-  claude -p "こんにちは。1行で返答してください。" --model claude-sonnet-4-5
+  claude -p "こんにちは。1行で返答してください。" --model claude-opus-4-6
 ```
 
-- [ ] `/v1/models` に `claude-sonnet-4-5` が出る
+- [ ] `/v1/models` に `claude-opus-4-6` が出る
 - [ ] `/v1/messages` が応答する（`404` なら vLLM が古く Anthropic 互換エンドポイントがない。新しいタグのコンテナにする）
 - [ ] `claude -p` が応答する
 
@@ -411,10 +411,10 @@ vLLM は元の名前のまま起動し、前に置いた LiteLLM Proxy で Claud
 ```yaml
 # LiteLLM の config.yaml（抜粋）
 model_list:
-  - model_name: claude-sonnet-4-5
+  - model_name: claude-opus-4-6
     litellm_params:
       model: hosted_vllm/qwen3-coder-next
-      api_base: http://gb10:8000/v1
+      api_base: http://gb10:11434/v1
 ```
 
 - `.env` の `LLM_BASE_URL` は Proxy の URL に、`LLM_MODEL` は `model_name` の値にする（事前チェックは Proxy の `/v1/models` に `model_name` が出ることを確かめる）
@@ -436,10 +436,9 @@ git pull
 .venv/bin/pip install -r requirements.txt
 
 # 2. .env を vLLM 向けに変える（OLLAMA_BASE_URL の行は消す。残っていても LLM_BASE_URL が優先される）
-#    LLM_BASE_URL=http://127.0.0.1:8000
-#    LLM_MODEL=claude-sonnet-4-5          # --served-model-name と同じ
+#    LLM_BASE_URL=http://127.0.0.1:11434
+#    LLM_MODEL=claude-opus-4-6          # --served-model-name と同じ
 #    LLM_NUM_CTX=262144                   # --max-model-len と同じ
-#    LLM_CONCURRENCY=2                    # --max-num-seqs と同じ
 nano .env
 
 # 3. systemd のユニットを入れ直す（ollama.service への依存を外し、reload に対応した版）
@@ -461,7 +460,7 @@ sudo systemctl start godoc-nightly.timer
 
 - [ ] `systemctl show godoc-web -p Wants -p After` に `ollama.service` が出ない
 - [ ] `systemctl show godoc-web -p ExecReload` に `kill -HUP` が出る
-- [ ] Web 画面から1ファイルだけ設計書を生成し、成功する（`モデル 'claude-sonnet-4-5' が推論サーバーにありません` と出たら `LLM_MODEL` と `--served-model-name` を揃える）
+- [ ] Web 画面から1ファイルだけ設計書を生成し、成功する（`モデル 'claude-opus-4-6' が推論サーバーにありません` と出たら `LLM_MODEL` と `--served-model-name` を揃える）
 
 以後、`.env` の `LLM_*`・`CLAUDE_*` などだけを変えたときは `sudo systemctl reload godoc-web` で読み直せる（実行中のバッチは止めず、次の実行から反映）。`WEB_*` を変えたとき・コードを更新したときは `restart` する。
 
@@ -477,7 +476,7 @@ sudo systemctl start godoc-nightly.timer
 | --- | --- | --- |
 | ログが `Using FlashInfer attention backend` から進まない | 重みのダウンロード中か、FlashInfer のカーネルを初回コンパイル中 | 手順4の切り分け（`du -sh` と `docker top vllm`）で確認する |
 | `docker run -d` の後、何も表示されず止まったように見える | `-d` でバックグラウンド起動しているため。初回はモデル（約85GB）のダウンロード中で、進捗も出ない | `docker logs -f vllm` で確認する。進捗を見たい場合は、手順1.5の「モデルを先にダウンロードする」で先にダウンロードする |
-| `curl http://localhost:8000/v1/models` が `Connection refused` | まだ読み込み・ウォームアップ中か、コンテナが落ちている | `docker ps -a` で Up か確認。Up なら `Application startup complete` が出るまで待つ。Exited なら `docker logs vllm` の末尾のエラーを見る |
+| `curl http://localhost:11434/v1/models` が `Connection refused` | まだ読み込み・ウォームアップ中か、コンテナが落ちている | `docker ps -a` で Up か確認。Up なら `Application startup complete` が出るまで待つ。Exited なら `docker logs vllm` の末尾のエラーを見る |
 | `/v1/models` が `401 Unauthorized` | 起動時に `--api-key` を付けている | `-H "Authorization: Bearer <キー>"` を付けて呼ぶ |
 | `Please set a HF_TOKEN` の警告が出る | Hugging Face に未認証でアクセスしている | 警告だけで処理は続く。消したい場合は `-e HF_TOKEN=<トークン>` を付ける |
 | モデルのダウンロードが極端に遅い・途中で止まる | 未認証のため速度が制限されている、または回線の問題 | `docker rm -f vllm` で止め、`-e HF_TOKEN=<トークン>` を付けて `hf download` で進捗を見ながらダウンロードし直す（手順4参照）。続きから再開する |
@@ -491,7 +490,7 @@ sudo systemctl start godoc-nightly.timer
 | VS Code（Claude Code）から使うと、サーバー側で reasoning parser のエラーが出る | Claude Code がシンキングを指定してリクエストしている | 手順5の「Claude Code のシンキングを止める」で、Claude Code 側のシンキングをオフにする |
 | `--reasoning-parser` を付けると、シンキングは表示されるがレスポンスが表示されない | Qwen3-Coder-Next はシンキングの区切りを出さないため、応答全体がシンキング扱いになる | `--reasoning-parser` を外して起動し直し、Claude Code 側のシンキングをオフにする |
 | ツール呼び出しを含む長い入力で `!!!!` が延々と出る | ツール呼び出しの解釈の不具合（報告例あり） | `--tool-call-parser qwen3_xml` に変えて起動し直す |
-| 実行がすぐ `推論サーバーに接続できません` で終わる | vLLM が止まっている、または `LLM_BASE_URL` が違う | `curl http://127.0.0.1:8000/v1/models` で確認し、`.env` の `LLM_BASE_URL` を直して `sudo systemctl reload godoc-web` |
+| 実行がすぐ `推論サーバーに接続できません` で終わる | vLLM が止まっている、または `LLM_BASE_URL` が違う | `curl http://127.0.0.1:11434/v1/models` で確認し、`.env` の `LLM_BASE_URL` を直して `sudo systemctl reload godoc-web` |
 | 実行がすぐ `モデル 'xxx' が推論サーバーにありません` で終わる | `LLM_MODEL` と `--served-model-name` が違う | エラーに出る「提供中」の名前に `LLM_MODEL` を揃えて `sudo systemctl reload godoc-web` |
 | `.env` を直したのに古い設定で動く | Web 画面が起動時の `.env` のまま | `sudo systemctl reload godoc-web`（行を消した場合は `restart`。reload は値の上書きだけで、消した行は残る） |
 
@@ -538,7 +537,7 @@ docker run -d --name vllm --gpus all --network host --ipc=host \
   nvcr.io/nvidia/vllm:<タグ> \
   vllm serve openai/gpt-oss-120b \
     --served-model-name gpt-oss-120b \
-    --host 0.0.0.0 --port 8000 \
+    --host 0.0.0.0 --port 11434 \
     --gpu-memory-utilization 0.7 \
     --max-model-len 131072 \
     --max-num-seqs 2 \
@@ -547,8 +546,8 @@ docker run -d --name vllm --gpus all --network host --ipc=host \
 docker logs -f vllm
 
 # 5. 動作テスト
-curl http://localhost:8000/v1/models
-curl http://localhost:8000/v1/chat/completions \
+curl http://localhost:11434/v1/models
+curl http://localhost:11434/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-oss-120b","messages":[{"role":"user","content":"こんにちは"}],"max_tokens":64}'
 ```
@@ -559,7 +558,7 @@ curl http://localhost:8000/v1/chat/completions \
 
 - メモリが足りない場合は、手順3と同じ順（`--enforce-eager` を追加 → `--max-model-len` を下げる）で調整する。`--gpu-memory-utilization` は 0.6 まで下げられる
 - gpt-oss-120b でのツール呼び出しは `tool_choice="auto"` だけに対応している
-- Qwen3-Coder-Next に戻すときは、`docker rm -f vllm` の後に手順1.5の `docker run` で起動し直し、`.env` の `LLM_MODEL`（`claude-sonnet-4-5`）・`LLM_NUM_CTX` を戻して `sudo systemctl reload godoc-web` する
+- Qwen3-Coder-Next に戻すときは、`docker rm -f vllm` の後に手順1.5の `docker run` で起動し直し、`.env` の `LLM_MODEL`（`claude-opus-4-6`）・`LLM_NUM_CTX` を戻して `sudo systemctl reload godoc-web` する
 - gpt-oss-120b でも動かない場合は、次の「Ollama に戻す手順」で元に戻す
 - 参照: [vLLM の gpt-oss-120b レシピ](https://recipes.vllm.ai/openai/gpt-oss-120b)
 
@@ -678,14 +677,14 @@ sudo systemctl disable --now ollama
 ```ini
 # /etc/systemd/system/vllm.service
 [Unit]
-Description=vLLM Qwen3-Coder-Next (served as claude-sonnet-4-5)
+Description=vLLM Qwen3-Coder-Next (served as claude-opus-4-6)
 After=network.target
 Conflicts=ollama.service
 
 [Service]
 User=<ユーザー名>
 ExecStartPre=+/bin/sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'
-ExecStart=/path/to/venv/bin/vllm serve Qwen/Qwen3-Coder-Next-FP8 --served-model-name claude-sonnet-4-5 --host 0.0.0.0 --port 8000 --gpu-memory-utilization 0.8 --max-model-len 262144 --max-num-seqs 2 --kv-cache-dtype fp8 --enable-auto-tool-choice --tool-call-parser qwen3_coder
+ExecStart=/path/to/venv/bin/vllm serve Qwen/Qwen3-Coder-Next-FP8 --served-model-name claude-opus-4-6 --host 0.0.0.0 --port 11434 --gpu-memory-utilization 0.8 --max-model-len 262144 --max-num-seqs 2 --kv-cache-dtype fp8 --enable-auto-tool-choice --tool-call-parser qwen3_coder
 Restart=on-failure
 
 [Install]
