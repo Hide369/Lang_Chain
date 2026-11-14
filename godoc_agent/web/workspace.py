@@ -26,10 +26,12 @@ class Workspace:
 
 
 class WorkspaceStore:
-    def __init__(self, state_dir: Path, browse_roots: tuple[Path, ...]):
+    def __init__(self, state_dir: Path, browse_roots: tuple[Path, ...], extra_roots: tuple[Path, ...] = ()):
         self.path = state_dir / "workspace.json"  # 共有の既定値
         self.clients_dir = state_dir / "workspaces"
         self.roots = browse_roots
+        # フォルダ選択ダイアログには出さないが、対象・出力先として認める範囲（クライアント PC からのアップロード先）
+        self.extra_roots = extra_roots
         self._lock = threading.Lock()
 
     def _path_for(self, client_id: str | None) -> Path:
@@ -55,7 +57,7 @@ class WorkspaceStore:
             return own
         return self._read(self.path) or Workspace()
 
-    def set(self, repo: str, out: str, client_id: str | None = None) -> Workspace:
+    def set(self, repo: str, out: str, client_id: str | None = None, *, share: bool = True) -> Workspace:
         repo_path = self.check_repo(repo)
         out_path = self.check_out(out)
         if repo_path == out_path or out_path.is_relative_to(repo_path):
@@ -63,7 +65,8 @@ class WorkspaceStore:
         workspace = Workspace(repo=str(repo_path), out=str(out_path))
         # 最後に選ばれたフォルダを共有の既定値にもする（まだ選んでいないブラウザの初期値・
         # フォルダの記録がない以前の定期実行の設定で使う。以前の版と同じ動き）
-        paths = dict.fromkeys([self._path_for(client_id), self.path])
+        # （アップロードしたフォルダは、そのブラウザの人のものなので共有の既定値にしない: share=False）
+        paths = dict.fromkeys([self._path_for(client_id), *([self.path] if share else [])])
         with self._lock:
             for path in paths:
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -78,7 +81,7 @@ class WorkspaceStore:
         if not raw or not Path(raw).is_absolute():
             raise ValueError(f"フォルダは絶対パスで指定してください: {raw!r}")
         path = Path(raw).resolve()
-        if not any(path == root or path.is_relative_to(root) for root in self.roots):
+        if not any(path == root or path.is_relative_to(root) for root in (*self.roots, *self.extra_roots)):
             raise PermissionError(f"選べる範囲（{', '.join(map(str, self.roots))}）の外です: {path}")
         return path
 

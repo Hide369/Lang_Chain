@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+import zipfile
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
@@ -343,6 +344,15 @@ class JobManager:
                 "updated_at": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
             })
         return items
+
+    @classmethod
+    def write_archive(cls, out_dir: Path, dest: Path) -> int:
+        """生成物をすべて ZIP にまとめる（一覧と同じく、ログ・管理用のファイルは含めない）。入れた件数を返す。"""
+        items = cls.list_outputs(out_dir)
+        with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for item in items:
+                archive.write(out_dir / item["path"], arcname=item["path"])
+        return len(items)
 
     @staticmethod
     def output_file(out_dir: Path, rel_path: str) -> Path:

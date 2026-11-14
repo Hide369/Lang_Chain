@@ -9,7 +9,9 @@
 import base64
 import binascii
 import json
+import os
 import secrets
+import tempfile
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -17,9 +19,11 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, PlainTextResponse
+from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field
 
 from ..config import DEFAULT_CONCURRENCY, MAX_CONCURRENCY
+from ..runlock import is_locked
 from ..skill_registry import OUTPUT_TYPE_LABELS, OUTPUT_TYPES
 from .auth import LoginThrottle, SessionStore, validate_password_hash, verify_password
 from .git_repo import GitRepoError, inspect_repo
@@ -28,6 +32,7 @@ from .schedule import Scheduler, ScheduleStore
 from .settings import APP_DIR, WebSettings
 from .skills import SkillFile, SkillStore
 from .targets_editor import TargetsEditor
+from .uploads import UploadNotFound, UploadStore
 from .workspace import CLIENT_ID_RE, WorkspaceStore
 
 COOKIE_NAME = "godoc_session"
@@ -84,6 +89,16 @@ class SkillUpload(BaseModel):
     type: str | None = None
 
 
+class UploadBegin(BaseModel):
+    # ブラウザで選んだフォルダの名前（サーバー上の置き場所の名前になる）
+    name: str = Field(min_length=1, max_length=100)
+
+
+class UploadFiles(BaseModel):
+    # 1回のリクエストで送るのは一部だけ（ブラウザが数MBずつに分けて送る）
+    files: list[UploadedFile] = Field(min_length=1, max_length=1000)
+
+
 class TargetsRequest(BaseModel):
     config: dict
 
@@ -100,7 +115,8 @@ def create_app(
     jobs = jobs or JobManager()
     sessions = SessionStore(settings.session_ttl_s)
     throttle = throttle or LoginThrottle()
-    workspace = WorkspaceStore(settings.state_dir, settings.browse_roots)
+    uploads = UploadStore(settings.state_dir)
+    workspace = WorkspaceStore(settings.state_dir, settings.browse_roots, extra_roots=(uploads.root,))
     skills = skills or SkillStore(app_dir)
     targets = TargetsEditor(app_dir)
     schedule_store = ScheduleStore(settings.state_dir)
@@ -297,6 +313,24 @@ def create_app(
         out = current_out(request)
         return jobs.list_outputs(out) if out else []
 
+    @app.get("/api/outputs/archive", dependencies=[Depends(require_viewer)])
+    def outputs_archive(request: Request) -> FileResponse:
+        """出力先の生成物をすべて ZIP でダウンロードする（クライアント PC に持ち帰るため）。"""
+        out = out_for_view(request)
+        fd, tmp = tempfile.mkstemp(suffix=".zip")
+        os.close(fd)
+        try:
+            count = jobs.write_archive(out, Path(tmp))
+        except OSError as e:
+            os.unlink(tmp)
+            raise HTTPException(500, f"ZIP を作れません: {e}") from e
+        if count == 0:
+            os.unlink(tmp)
+            raise HTTPException(404, "生成物がありません")
+        name = f"{out.name}-{datetime.now():%Y%m%d-%H%M%S}.zip"
+        # 送り終えたら一時ファイルを消す
+        return FileResponse(tmp, media_type="application/zip", filename=name, background=BackgroundTask(os.unlink, tmp))
+
     @app.get("/api/outputs/file", dependencies=[Depends(require_viewer)])
     def output_file(path: str, request: Request, download: bool = False):
         try:
@@ -398,6 +432,61 @@ def create_app(
         except (ValueError, PermissionError) as e:
             raise HTTPException(400, str(e)) from e
         return {"repo": ws.repo, "out": ws.out}
+
+    # --- クライアント PC からのアップロード（管理者だけ） ---------------------------------------
+
+    def upload_client(request: Request) -> str:
+        cid = client_id(request)
+        if cid is None:  # ミドルウェアが必ず付けるので、ここには来ない
+            raise HTTPException(400, "利用者IDがありません")
+        return cid
+
+    @app.post("/api/uploads", dependencies=[Depends(require_admin)])
+    def begin_upload(body: UploadBegin, request: Request) -> dict:
+        try:
+            return {"upload_id": uploads.begin(upload_client(request), body.name)}
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+
+    @app.post("/api/uploads/{upload_id}/files", dependencies=[Depends(require_admin)])
+    def add_upload_files(upload_id: str, body: UploadFiles, request: Request) -> dict:
+        try:
+            files = [SkillFile(f.path, base64.b64decode(f.content_b64, validate=True)) for f in body.files]
+        except (binascii.Error, ValueError) as e:
+            raise HTTPException(400, "ファイルの内容が正しく送られていません") from e
+        try:
+            return uploads.add_files(upload_client(request), upload_id, files)
+        except UploadNotFound as e:
+            raise HTTPException(404, "アップロードが見つかりません（最初からやり直してください）") from e
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+
+    def out_is_busy(out: Path) -> bool:
+        job = jobs.job_for(out)
+        return (job is not None and job.running) or is_locked(out)
+
+    @app.post("/api/uploads/{upload_id}/complete", dependencies=[Depends(require_admin)])
+    def complete_upload(upload_id: str, request: Request) -> dict:
+        cid = upload_client(request)
+        try:
+            src, out = uploads.complete(cid, upload_id, out_is_busy)
+            # アップロードしたフォルダを、このブラウザの対象・出力先にする
+            ws = workspace.set(str(src), str(out), cid, share=False)
+        except UploadNotFound as e:
+            raise HTTPException(404, "アップロードが見つかりません（最初からやり直してください）") from e
+        except RuntimeError as e:
+            raise HTTPException(409, str(e)) from e
+        except (ValueError, PermissionError) as e:
+            raise HTTPException(400, str(e)) from e
+        return {"repo": ws.repo, "out": ws.out}
+
+    @app.delete("/api/uploads/{upload_id}", dependencies=[Depends(require_admin)])
+    def abort_upload(upload_id: str, request: Request) -> dict:
+        try:
+            uploads.abort(upload_client(request), upload_id)
+        except UploadNotFound as e:
+            raise HTTPException(404, "アップロードが見つかりません") from e
+        return {"aborted": True}
 
     # --- スキル（管理者だけ） --------------------------------------------------------------
 
